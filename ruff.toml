@@ -1,0 +1,7 @@
+[lint]
+# Avoid enforcing line-length violations (`E501`)
+ignore = ["E501"]
+
+[format]
+# Use single quotes when formatting.
+quote-style = "single"

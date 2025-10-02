@@ -1,0 +1,39 @@
+[project]
+name = "phenocoder"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.10"
+dependencies = [
+    "muon",
+    "numpy",
+    "anndata",
+    "pandas",
+    "scanpy",
+    "squidpy",
+    "tensorflow>=2.20.0",
+    "bbknn>=1.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13.2"
+]
+
+[tool.ruff]
+line-length = 120
+[tool.basedpyright]
+typeCheckingMode = "basic"
+reportUnknownVariableType = false
+reportUnknownParameterType = false
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportArgumentType = false
+reportOptionalMemberAccess = false
+reportAttributeAccessIssue = false
+reportIndexIssue = false
+reportOptionalSubscript = false
+reportCallIssue = false
+reportAssignmentType = false
+reportReturnType = false
+reportOptionalIterable = false
+reportOperatorIssue = false
