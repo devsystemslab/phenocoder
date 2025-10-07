@@ -25,24 +25,24 @@ def organoid_embedding(
     :return:
     """
     df = df.loc[:, ~df.columns.duplicated()]
-    adata = ad.AnnData(df.drop(columns=["well_id", "plate_id"]))
+    adata = ad.AnnData(df.drop(columns=['well_id', 'plate_id']))
     adata.obs.index = adata.obs.index.astype(str)
-    adata.var_names = df.drop(columns=["well_id", "plate_id"]).columns.tolist()
+    adata.var_names = df.drop(columns=['well_id', 'plate_id']).columns.tolist()
     adata.obs = df.drop(columns=adata.var_names)
-    adata.layers["raw"] = adata.X.copy()
+    adata.layers['raw'] = adata.X.copy()
     sc.pp.scale(adata)
     adata.X[np.isnan(adata.X)] = 0
 
     if df_plate_layouts is not None:
         adata.obs = pd.merge(
-            adata.obs, df_plate_layouts, on=["well_id", "plate_id"], how="left"
+            adata.obs, df_plate_layouts, on=['well_id', 'plate_id'], how='left'
         )
-        adata.obs.index = adata.obs["well_id"] + "_" + adata.obs["plate_id"]
+        adata.obs.index = adata.obs['well_id'] + '_' + adata.obs['plate_id']
         if batch_correction:
             if confounder is None:
                 confounder = []
             bbknn.ridge_regression(
-                adata, batch_key=["plate_id"], confounder_key=confounder
+                adata, batch_key=['plate_id'], confounder_key=confounder
             )
     sc.pp.highly_variable_genes(adata)
     if n_comps_pca > adata.obs.shape[0]:
@@ -50,9 +50,9 @@ def organoid_embedding(
     sc.pp.pca(adata, n_comps=n_comps_pca, use_highly_variable=True)
 
     if batch_correction:
-        bbknn.bbknn(adata, batch_key="plate_id")
+        bbknn.bbknn(adata, batch_key='plate_id')
     else:
-        sc.pp.neighbors(adata, use_rep="X_pca")
+        sc.pp.neighbors(adata, use_rep='X_pca')
     sc.tl.leiden(adata, resolution=res)
     sc.tl.umap(adata, n_components=2)
     return adata
@@ -80,58 +80,58 @@ def run_organoid_embedding(
 
     adata_dict = {}
     for mod in spatial_dict.keys():
-        print(f"Generating organoid embedding for {mod}...")
+        print(f'Generating organoid embedding for {mod}...')
         adata_dict[mod] = organoid_embedding(
             spatial_dict[mod],
             df_plate_layouts,
-            n_comps_pca=n_comps_pca["org_embedding"],
-            res=res["org_embedding"],
+            n_comps_pca=n_comps_pca['org_embedding'],
+            res=res['org_embedding'],
             batch_correction=batch_correction,
             confounder=confounder,
         )
 
     if combine_modalities:
-        print("Generating combined phenocoder organoid embeddings...")
-        adata_dict["phenocoder_combined"] = organoid_embedding(
+        print('Generating combined phenocoder organoid embeddings...')
+        adata_dict['phenocoder_combined'] = organoid_embedding(
             pd.concat(
-                [spatial_dict["phenocoder"], spatial_dict["phenocoder_msg"]], axis=1
+                [spatial_dict['phenocoder'], spatial_dict['phenocoder_msg']], axis=1
             ),
             df_plate_layouts,
-            n_comps_pca=n_comps_pca["org_embedding"],
-            res=res["org_embedding"],
+            n_comps_pca=n_comps_pca['org_embedding'],
+            res=res['org_embedding'],
             batch_correction=batch_correction,
             confounder=confounder,
         )
 
-        print("Generating combined imputed organoid embeddings...")
-        adata_dict["imputed_combined"] = organoid_embedding(
+        print('Generating combined imputed organoid embeddings...')
+        adata_dict['imputed_combined'] = organoid_embedding(
             pd.concat(
                 [
-                    spatial_dict["imputed_nuclei_bytimepoints_False"],
-                    spatial_dict["imputed_neighbors_bytimepoints_False"],
+                    spatial_dict['imputed_nuclei_bytimepoints_False'],
+                    spatial_dict['imputed_neighbors_bytimepoints_False'],
                 ],
                 axis=1,
             ),
             df_plate_layouts,
-            n_comps_pca=n_comps_pca["org_embedding"],
-            res=res["org_embedding"],
+            n_comps_pca=n_comps_pca['org_embedding'],
+            res=res['org_embedding'],
             batch_correction=batch_correction,
             confounder=confounder,
         )
 
-        print("Generating combined organoid embeddings with all modalities...")
-        adata_dict["all_combined"] = organoid_embedding(
+        print('Generating combined organoid embeddings with all modalities...')
+        adata_dict['all_combined'] = organoid_embedding(
             pd.concat(
                 [
                     spatial_dict[mod]
                     for mod in spatial_dict.keys()
-                    if "phenocoder" in mod or "imputed" in mod
+                    if 'phenocoder' in mod or 'imputed' in mod
                 ],
                 axis=1,
             ),
             df_plate_layouts,
-            n_comps_pca=n_comps_pca["org_embedding"],
-            res=res["org_embedding"],
+            n_comps_pca=n_comps_pca['org_embedding'],
+            res=res['org_embedding'],
             batch_correction=batch_correction,
             confounder=confounder,
         )

@@ -66,8 +66,8 @@ def encode_nuclei_patches(
     dir_screen,
     cycle,
     dir_model,
-    input_type='TIF_OVR_BG',
-    use_registered=False,
+    input_type='TIF_OVR_BG',  # fix: dataset specific
+    use_registered=False,  # fix: dataset specific
     label_type=None,
     df_labels=None,
     return_only_patches=False,
@@ -164,9 +164,11 @@ def encode_nuclei_patches(
             results.append([patches, df])
         else:
             if config['conditional']:
-                df_cond = df[['plate_id', 'z']]
+                df_cond = df[['plate_id', 'z']]  # fix: dataset specific
                 # rename plate_id to dataset
-                df_cond = df_cond.rename(columns={'plate_id': 'dataset'})
+                df_cond = df_cond.rename(
+                    columns={'plate_id': 'dataset'}
+                )  # fix: dataset specific
                 # reset index
                 if filter_encodable_conditions:
                     # filter out conditions which cannot be encoded
@@ -186,11 +188,11 @@ def encode_nuclei_patches(
                 z_mean, z_log_var, z = cvae.encoder.predict(patches, batch_size=64)
             df_z = pd.DataFrame(z, columns=[f'z_{i}' for i in range(z.shape[-1])])
             # reset z to pixel coordinates
-            df['z'] = df['z'] / 0.322 * 10
+            df['z'] = df['z'] / 0.322 * 10  # fix: dataset specific
 
-            if not use_registered:
+            if not use_registered:  # fix: dataset specific
                 # drop non numeric cols
-                df = df.drop(columns=['well_id', 'plate_id'])
+                df = df.drop(columns=['well_id', 'plate_id'])  # fix: dataset specific
                 # add df_z to df
                 df = pd.concat([df, df_z], axis=1)
                 df = df.groupby('label').mean()
@@ -212,7 +214,9 @@ def encode_nuclei_patches(
 
             if message_passing:
                 # calculate knn graph in physical space
-                adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
+                adata.obsm['spatial'] = adata.obs[
+                    ['x', 'y', 'z']
+                ].values.copy()  # fix: dataset specific -> 2D + 3D cases
                 sq.gr.spatial_neighbors(
                     adata, radius=radius, coord_type='generic', spatial_key='spatial'
                 )
@@ -234,7 +238,9 @@ def encode_nuclei_patches(
     return adata
 
 
-def merge_adata(adata_source, adata_target, make_labels_unique=False):
+def merge_adata(
+    adata_source, adata_target, make_labels_unique=False
+):  # delete: dataset specific
     """
     Merge adata_source and adata_target
     :param adata_source:
@@ -282,10 +288,10 @@ def merge_adata(adata_source, adata_target, make_labels_unique=False):
 def encode_grid_patches(
     well,
     plate,
-    dir_screen,
-    cycle,
+    dir_screen,  # fix: dataset specific
+    cycle,  # fix: dataset specific
     dir_model,
-    input_type='TIF_OVR_BG',
+    input_type='TIF_OVR_BG',  # fix: dataset specific
     grid_resolution=1,
     filter_encodable_conditions=False,
     concatenate_latent_variables=False,

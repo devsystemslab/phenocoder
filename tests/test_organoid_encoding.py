@@ -72,9 +72,9 @@ def test_grid_encoding():
         filter_encodable_conditions=False,
     )
 
-    adata = merge_adata(adata_grid_1, adata_grid_2)
+    merge_adata(adata_grid_1, adata_grid_2)
 
 
 if __name__ == '__main__':
     test_nuclei_patch_encoding()
-    # test_grid_encoding()
+    test_grid_encoding()

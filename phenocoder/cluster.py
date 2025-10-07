@@ -4,12 +4,7 @@ import muon as mu
 import anndata as ad
 import pandas as pd
 import scanpy as sc
-import rapids_singlecell as rsc
-import rmm
-from rmm.allocators.cupy import rmm_cupy_allocator
-from numba import cuda
 from tqdm import tqdm
-# TODO: reduce number of used libraries. -> remove rapids, rmm
 
 
 def majority_voting(x: np.ndarray, y: np.ndarray) -> int:
@@ -105,56 +100,27 @@ def clustering(
     :param layer:
     :return:
     """
-    if use_gpu:
-        print('Setting up GPU...')
-        if reset_gpu:
-            device = cuda.get_current_device()
-            device.reset()
-        rmm.reinitialize(managed_memory=True, pool_allocator=False, devices=0)
-        cp.cuda.set_allocator(rmm_cupy_allocator)
-        print('Running clustering pipeline...')
-        rsc.get.anndata_to_GPU(adata)
-        if run_pca:
-            print('Running PCA...')
+    if run_pca:
+        print('Running PCA...')
+        if adata.X.shape[1] == 1:
+            adata.obsm['X_pca'] = adata.X.copy()
+        else:
             if n_comps >= adata.X.shape[1]:
                 n_comps = adata.X.shape[1] - 1
-            rsc.tl.pca(adata, n_comps=n_comps, layer=layer, mask_var=var_subset)
-        if not dry_run:
-            if run_harmony:
-                print('Running harmony...')
-                rsc.pp.harmony_integrate(adata, key=['plate_id'], max_iter_harmony=30)
-                print('Computing neighbors...')
-                rsc.pp.neighbors(adata, use_rep='X_pca_harmony')
-            else:
-                print('Computing neighbors...')
-                rsc.pp.neighbors(adata, use_rep='X_pca')
-            print('Running UMAP...')
-            rsc.tl.umap(adata, n_components=2)
-            print('Running leiden clustering...')
-            rsc.tl.leiden(adata, resolution=resolution)
-        rsc.get.anndata_to_CPU(adata)
-    else:
-        if run_pca:
-            print('Running PCA...')
-            if adata.X.shape[1] == 1:
-                adata.obsm['X_pca'] = adata.X.copy()
-            else:
-                if n_comps >= adata.X.shape[1]:
-                    n_comps = adata.X.shape[1] - 1
-            sc.tl.pca(adata, n_comps=n_comps, layer=layer, mask_var=var_subset)
-        if not dry_run:
-            if run_harmony:
-                print('Running harmony...')
-                rsc.pp.harmony_integrate(adata, key=['plate_id'], max_iter_harmony=30)
-                print('Computing neighbors...')
-                sc.pp.neighbors(adata, use_rep='X_pca_harmony')
-            else:
-                print('Computing neighbors...')
-                sc.pp.neighbors(adata, use_rep='X_pca')
-            print('Running UMAP...')
-            sc.tl.umap(adata, n_components=2)
-            print('Running leiden clustering...')
-            sc.tl.leiden(adata, resolution=resolution)
+        sc.tl.pca(adata, n_comps=n_comps, layer=layer, mask_var=var_subset)
+    if not dry_run:
+        if run_harmony:
+            print('Running harmony...')
+            sc.pp.harmony_integrate(adata, key=['plate_id'], max_iter_harmony=30)
+            print('Computing neighbors...')
+            sc.pp.neighbors(adata, use_rep='X_pca_harmony')
+        else:
+            print('Computing neighbors...')
+            sc.pp.neighbors(adata, use_rep='X_pca')
+        print('Running UMAP...')
+        sc.tl.umap(adata, n_components=2)
+        print('Running leiden clustering...')
+        sc.tl.leiden(adata, resolution=resolution)
 
     return adata
 

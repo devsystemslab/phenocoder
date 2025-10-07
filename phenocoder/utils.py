@@ -1,65 +1,12 @@
-import sys
-sys.path.append('/pstore/home/harmelc/tumoroid')
 import numpy as np
 import pandas as pd
 import os
 from pathlib import Path
 import anndata as ad
 from tqdm import tqdm
-import socket
-from dask_jobqueue import SLURMCluster
-from dask.distributed import Client
 
-def setup_dask_slurm_client(job_name: str = "dask-worker",
-                            n_workers: int = 4, 
-                           cores_per_worker: int = 4,
-                           memory_per_worker: str = "16GB",
-                           walltime: str = "3:00:00",
-                           log_directory:str = None):
 
-    """
-    Setup Dask cluster on SLURM
-    
-    :param n_workers: number of worker nodes
-    :param cores_per_worker: cores per worker
-    :param memory_per_worker: memory per worker
-    :param walltime: walltime for SLURM job
-    :param log_directory: log file directory
-    """
-
-    # get hostname
-    host_name = socket.gethostname()
-    if host_name.__contains__('rkanc'):
-        if log_directory is None:
-            log_directory = os.getcwd()
-        else:
-            Path(log_directory).mkdir(parents=True, exist_ok=True)
-        
-        cluster = SLURMCluster(
-            cores=cores_per_worker,
-            memory=memory_per_worker,
-            walltime=walltime,
-            job_extra=['--ntasks=1', 
-                        '--cpus-per-task={}'.format(cores_per_worker), 
-                        f'--output={task_name}-%j.out'
-                        f'--error={task_name}-%j.err'],
-            death_timeout=600
-        )
-        
-        cluster.scale(n_workers)
-
-        client = Client(cluster)
-
-        print('Dask cluster set up on sHPC and dashboard available at:')
-        print(client.dashboard_link)
-        return client, cluster
-    else:
-        client = Client(n_workers=8, threads_per_worker=1)
-        print('Local Dask cluster set up and dashboard available at:')
-        print(client.dashboard_link)
-        return client, None
-
-def get_metadata(dir_images:str) -> pd.DataFrame:
+def get_metadata(dir_images: str) -> pd.DataFrame:
     """
     Get metadata from image filenames
     :param dir_images:
@@ -74,7 +21,10 @@ def get_metadata(dir_images:str) -> pd.DataFrame:
     df = df[~df.isna().any(axis=1)]
     return df
 
-def scale_image(image:np.ndarray, percentile:int = 1, range: tuple[int] = (0, 65535)) -> np.ndarray:
+
+def scale_image(
+    image: np.ndarray, percentile: int = 1, range: tuple[int] = (0, 65535)
+) -> np.ndarray:
     """
     Scale image
     :param image:
@@ -82,10 +32,15 @@ def scale_image(image:np.ndarray, percentile:int = 1, range: tuple[int] = (0, 65
     :param range:
     :return:
     """
-    image = np.interp(image, (np.percentile(image, percentile), np.percentile(image, 100 - percentile)), range)
+    image = np.interp(
+        image,
+        (np.percentile(image, percentile), np.percentile(image, 100 - percentile)),
+        range,
+    )
     return image
 
-def prefix_to_suffix(string:str, sep:str = '_') -> str:
+
+def prefix_to_suffix(string: str, sep: str = '_') -> str:
     """
     Prefix to suffix
     :param string:
@@ -96,7 +51,8 @@ def prefix_to_suffix(string:str, sep:str = '_') -> str:
     # move first word to the end
     return sep.join(words[1:] + [words[0]])
 
-def suffix_to_prefix(string:str, sep:str = '_') -> str:
+
+def suffix_to_prefix(string: str, sep: str = '_') -> str:
     """
     Suffix to prefix
     :param string:
@@ -107,7 +63,10 @@ def suffix_to_prefix(string:str, sep:str = '_') -> str:
     # move last word to the beginning
     return sep.join([words[-1]] + words[:-1])
 
-def load_features(well: str, dir_plate: str, cycle: str, input_type: str) -> pd.DataFrame:
+
+def load_features(
+    well: str, dir_plate: str, cycle: str, input_type: str
+) -> pd.DataFrame:
     """
     Load features for a given well
     :param well:
@@ -122,19 +81,31 @@ def load_features(well: str, dir_plate: str, cycle: str, input_type: str) -> pd.
     files = [f for f in os.listdir(dir_laminator) if f.startswith(f'{well}_')]
     if len(files) == 0:
         return pd.DataFrame()
-    df_laminator =  [pd.read_csv(Path(dir_laminator, f)).assign(z=f.replace(f'{well}_', '').replace('.csv', '')) for f in files]
+    df_laminator = [
+        pd.read_csv(Path(dir_laminator, f)).assign(
+            z=f.replace(f'{well}_', '').replace('.csv', '')
+        )
+        for f in files
+    ]
     if len(df_laminator) == 0:
         return pd.DataFrame()
     df_laminator = pd.concat(df_laminator)
     # drop columns starting with Unnamed
     df_laminator = df_laminator.loc[:, ~df_laminator.columns.str.contains('^Unnamed')]
     files = [f for f in os.listdir(dir_nuclei) if f.startswith(f'{well}_')]
-    df_nuclei = [pd.read_csv(Path(dir_nuclei, f)).assign(z=f.replace(f'{well}_', '').replace('.csv', '')) for f in files]
+    df_nuclei = [
+        pd.read_csv(Path(dir_nuclei, f)).assign(
+            z=f.replace(f'{well}_', '').replace('.csv', '')
+        )
+        for f in files
+    ]
     df_nuclei = [df for df in df_nuclei if df.shape[0] > 0]
     if len(df_nuclei) == 0:
         return pd.DataFrame()
     df_nuclei = pd.concat(df_nuclei)
-    df = pd.merge(df_laminator, df_nuclei, on=['label', 'z'], how='inner').set_index('label')
+    df = pd.merge(df_laminator, df_nuclei, on=['label', 'z'], how='inner').set_index(
+        'label'
+    )
     df['z'] = df['z'].astype(int)
     df['z'] = df['z'] - 1
     # remove y, x, sample, well, z_stack columns
@@ -153,7 +124,10 @@ def load_features(well: str, dir_plate: str, cycle: str, input_type: str) -> pd.
         df.rename(columns={column: f'ch_0{new_column}_nuclei'}, inplace=True)
     return df
 
-def get_centroids(df: pd.DataFrame, z_step: int, pixel_size: float, filter_area: int = None) -> pd.DataFrame:
+
+def get_centroids(
+    df: pd.DataFrame, z_step: int, pixel_size: float, filter_area: int = None
+) -> pd.DataFrame:
     """
     Get centroids from label image
     :param df:
@@ -171,7 +145,10 @@ def get_centroids(df: pd.DataFrame, z_step: int, pixel_size: float, filter_area:
         df = df[df['area'] > filter_area]
     return df
 
-def average_matched_nuclei(adata: ad.AnnData, features:list, naming:str = 'suffix') -> ad.AnnData:
+
+def average_matched_nuclei(
+    adata: ad.AnnData, features: list, naming: str = 'suffix'
+) -> ad.AnnData:
     """
     Average matched nuclei
     :param adata:
@@ -181,18 +158,25 @@ def average_matched_nuclei(adata: ad.AnnData, features:list, naming:str = 'suffi
     """
     if naming == 'suffix':
         for feature in features:
-            adata.obs[f'{feature}'] = adata.obs[[f'{feature}_source', f'{feature}_target']].mean(axis=1)
+            adata.obs[f'{feature}'] = adata.obs[
+                [f'{feature}_source', f'{feature}_target']
+            ].mean(axis=1)
     if naming == 'prefix':
         for feature in features:
-            adata.obs[f'{feature}'] = adata.obs[[f'source_{feature}', f'target_{feature}']].mean(axis=1)
+            adata.obs[f'{feature}'] = adata.obs[
+                [f'source_{feature}', f'target_{feature}']
+            ].mean(axis=1)
     return adata
 
-def load_plate(plate: str,
-               input_type: str,
-               dir_screen: str,
-               registered: bool = True,
-               plate_id: str = None,
-               z_step: int = None) -> pd.DataFrame:
+
+def load_plate(
+    plate: str,
+    input_type: str,
+    dir_screen: str,
+    registered: bool = True,
+    plate_id: str = None,
+    z_step: int = None,
+) -> pd.DataFrame:
     """
     Load plate
     :param plate:
@@ -206,23 +190,47 @@ def load_plate(plate: str,
     if registered:
         dir_registration = Path(dir_screen, plate, 'features_registration', input_type)
         files = os.listdir(dir_registration)
-        df = [pd.read_csv(Path(dir_registration, file)).assign(well=file.replace('_registration.csv', ''))
-             for file in tqdm(files, desc=f'Loading {plate}')]
+        df = [
+            pd.read_csv(Path(dir_registration, file)).assign(
+                well=file.replace('_registration.csv', '')
+            )
+            for file in tqdm(files, desc=f'Loading {plate}')
+        ]
 
     else:
         if plate_id is None or z_step is None:
-            raise ValueError('plate_id and z_step must be provided for unregistered data!')
+            raise ValueError(
+                'plate_id and z_step must be provided for unregistered data!'
+            )
         else:
-            file = Path(dir_screen, plate, plate_id, 'features', 'nuclei', f'df_summary_{input_type}.csv')
+            file = Path(
+                dir_screen,
+                plate,
+                plate_id,
+                'features',
+                'nuclei',
+                f'df_summary_{input_type}.csv',
+            )
             wells = pd.read_csv(file)['well'].unique()
-            df = [get_centroids(
-                load_features(well, dir_plate=Path(dir_screen, plate), cycle=plate_id, input_type=input_type),
-                z_step=z_step, pixel_size=0.322).assign(well=well) for well in tqdm(wells, desc=f'Loading {plate_id}')]
+            df = [
+                get_centroids(
+                    load_features(
+                        well,
+                        dir_plate=Path(dir_screen, plate),
+                        cycle=plate_id,
+                        input_type=input_type,
+                    ),
+                    z_step=z_step,
+                    pixel_size=0.322,
+                ).assign(well=well)
+                for well in tqdm(wells, desc=f'Loading {plate_id}')
+            ]
     df = [df for df in df if not df.empty]
     df = pd.concat(df)
     df = df.assign(plate=plate)
     # index to unique string labels
     df.reset_index(drop=False, inplace=True)
-    df.index = df['label'].astype(str) + '_' + df['well'] + '_' + df['plate'].astype(str)
+    df.index = (
+        df['label'].astype(str) + '_' + df['well'] + '_' + df['plate'].astype(str)
+    )
     return df
-
