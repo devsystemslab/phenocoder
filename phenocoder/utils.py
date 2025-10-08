@@ -6,7 +6,7 @@ import anndata as ad
 from tqdm import tqdm
 
 
-def get_metadata(dir_images: str) -> pd.DataFrame:
+def get_metadata(dir_images: str, regex: str = None) -> pd.DataFrame:
     """
     Get metadata from image filenames
     :param dir_images:
@@ -14,7 +14,8 @@ def get_metadata(dir_images: str) -> pd.DataFrame:
     """
     images = os.listdir(dir_images)
     images = [image for image in images if '.tif' in image]
-    regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
+    if regex is None:
+        regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
     df = pd.DataFrame({'file': images, 'dir_images': str(dir_images)})
     df = df.join(df['file'].str.extractall(regex).groupby(level=0).last())
     # remove rows that have nan in any column
@@ -38,30 +39,6 @@ def scale_image(
         range,
     )
     return image
-
-
-def prefix_to_suffix(string: str, sep: str = '_') -> str:
-    """
-    Prefix to suffix
-    :param string:
-    :param sep:
-    :return:
-    """
-    words = string.split(sep)
-    # move first word to the end
-    return sep.join(words[1:] + [words[0]])
-
-
-def suffix_to_prefix(string: str, sep: str = '_') -> str:
-    """
-    Suffix to prefix
-    :param string:
-    :param sep:
-    :return:
-    """
-    words = string.split(sep)
-    # move last word to the beginning
-    return sep.join([words[-1]] + words[:-1])
 
 
 def load_features(

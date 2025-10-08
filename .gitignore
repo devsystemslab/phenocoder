@@ -4,3 +4,5 @@
 uv.lock
 .DS_Store
 */__pycache__/
+build/
+phenocoder.egg-info/
