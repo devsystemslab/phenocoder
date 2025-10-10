@@ -1,6 +1,5 @@
 import numpy as np
 import pynndescent
-import muon as mu
 import anndata as ad
 import pandas as pd
 import scanpy as sc
@@ -61,7 +60,7 @@ def project_clustering(
     return adata
 
 
-def get_accuracy(adata: ad.AnnData, adata_sampled: ad.AnnData) -> float:
+def get_accuracy(adata: ad.AnnData, adata_sampled: ad.AnnData, label_key: str) -> float:
     """
     Get accuracy
     :param adata:
@@ -69,8 +68,8 @@ def get_accuracy(adata: ad.AnnData, adata_sampled: ad.AnnData) -> float:
     :return:
     """
     n_sampled = adata_sampled.shape[0]
-    pred_true = adata.obs.loc[adata_sampled.obs.index]['leiden'] == adata_sampled.obs[
-        'leiden'
+    pred_true = adata.obs.loc[adata_sampled.obs.index][label_key] == adata_sampled.obs[
+        label_key
     ].astype(int)
     return np.sum(pred_true) / n_sampled
 
