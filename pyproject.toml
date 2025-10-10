@@ -4,20 +4,14 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.10"
 dependencies = [
-    "muon",
-    "numpy",
-    "anndata",
-    "pandas",
-    "scanpy",
-    "squidpy",
-    "tensorflow>=2.20.0",
-    "bbknn>=1.6.0",
+    "tensorflow==2.19.0",
     "spatialdata>=0.5.0",
+    "matplotlib>=3.10.6",
+    "squidpy>=1.6.5",
 ]
 
 [dependency-groups]
 dev = [
-    "black>=25.9.0",
     "ipython>=8.37.0",
     "pytest>=8.4.2",
     "ruff>=0.13.2",

@@ -1,6 +1,7 @@
 .idea/
 .venv/
 .ropeproject/
+.pytest_cache/
 uv.lock
 .DS_Store
 */__pycache__/

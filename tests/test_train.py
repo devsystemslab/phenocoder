@@ -1,7 +1,7 @@
 from phenocoder.train import train_model
 
-if __name__ == '__main__':
-    # TODO: rewrite test, no hardcoded paths
+
+def test_train():
     train_model(
         dir_dataset='/pstore/data/ihb-g-deco/USERS/schulzp9/tumoroid/test_all_plates',
         conditional=True,

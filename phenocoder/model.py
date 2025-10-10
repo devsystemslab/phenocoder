@@ -7,6 +7,8 @@ from keras import ops
 from keras import layers
 from keras.models import Model
 
+# TODO: add 3D versions...
+
 
 @keras.saving.register_keras_serializable(package='custom_layers')
 class Sampling(layers.Layer):
