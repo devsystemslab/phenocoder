@@ -6,6 +6,7 @@ from skimage.util import montage
 from skimage import io
 import matplotlib.pyplot as plt
 import scanpy as sc
+# TODO: rewrite tests, so there are no hardcoded paths anymore.
 
 
 def test_nuclei_patch_encoding():

@@ -17,6 +17,7 @@ def get_chull(
     degree_threshold: int = 5,
     filter_obs: bool = False,
     convert_units: bool = True,
+    pixel_size=0.322,
 ) -> float:
     """
     Get convex hull volume
@@ -69,8 +70,10 @@ def get_chull(
         index=[well + '_' + plate],
     )
     if convert_units:
-        df_results['volume_chull'] = df_results['volume_chull'] * 0.322**3 / 1000**3
-        df_results['area_chull'] = df_results['area_chull'] * 0.322**2 / 1000**2
+        df_results['volume_chull'] = (
+            df_results['volume_chull'] * pixel_size**3 / 1000**3
+        )
+        df_results['area_chull'] = df_results['area_chull'] * pixel_size**2 / 1000**2
     df_results['density_chull'] = len(pts) / df_results['volume_chull']
     return df_results
 
@@ -83,6 +86,7 @@ def get_chulls_connected_components(
     radius: int = 100,
     min_nds=10,
     convert_units=True,
+    pixel_size=0.322,
     plot=False,
 ) -> pd.DataFrame:
     """
@@ -95,6 +99,8 @@ def get_chulls_connected_components(
     :param radius:
     :param min_nds:
     :param convert_units:
+    :param pixel_size:
+    :param plot:
     :return:
     """
     adata = adata[adata.obs['plate_id'] == plate]
@@ -147,13 +153,13 @@ def get_chulls_connected_components(
             )
             if convert_units:  # TODO: pixel size as argument
                 df_component['distance_center'] = (
-                    df_component['distance_center'] * 0.322 / 1000
+                    df_component['distance_center'] * pixel_size / 1000
                 )
                 df_component['area_chull'] = (
-                    df_component['area_chull'] * 0.322**2 / 1000**2
+                    df_component['area_chull'] * pixel_size**2 / 1000**2
                 )
                 df_component['volume_chull'] = (
-                    df_component['volume_chull'] * 0.322**3 / 1000**3
+                    df_component['volume_chull'] * pixel_size**3 / 1000**3
                 )
             df_component['density_chull'] = (
                 df_component['volume_chull'] / df_component['n_pts']

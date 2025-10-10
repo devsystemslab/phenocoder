@@ -1,6 +1,7 @@
 from phenocoder.phenocode import encode_nuclei_patches
 
-if __name__ == '__main__':
+
+def test_predict():
     encode_nuclei_patches(
         well='A01',
         plate='HM003',
