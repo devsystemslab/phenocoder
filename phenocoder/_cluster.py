@@ -1,4 +1,5 @@
 import numpy as np
+import muon as mu
 import pynndescent
 import anndata as ad
 import pandas as pd

@@ -1,20 +1,24 @@
 from typing import Any
+import anndata as ad
 import spatialdata as sd
+from pathlib import Path
+
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.generator import DatasetGenerator, NucleiPatchGenerator, DatasetMerger
 from phenocoder.train import train_model
 from phenocoder.phenocode import encode_nuclei_patches
 from phenocoder.spatial import run_spatial_feature_processing
-from phenocoder.cluster import run_clustering
+from phenocoder._cluster import run_clustering
 
 
 class Phenocoder:
     """
-    A class for performing unsupervised morphometric phenotyping on spatial data.
+    A class for performing unsupervised morphometric spatial phenotyping on microscopy image data.
 
     Attributes:
         sdata (SpatialData): The SpatialData object.
-        model (str): The model to be used for phenotyping.
+        model (str): The type of model to be used for phenotyping.
+        model_dir (str|Path): Path to model directory.
         sample_key (str): The key for the sample in the SpatialData object.
 
     Methods:
@@ -29,12 +33,15 @@ class Phenocoder:
         spatialgraph_embedding(): Generate a spatial graph embedding.
     """
 
-    def __init__(self, *kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         self.sdata: sd.SpatialData = None
-        self.model: str = None
+        self.adata: ad.AnnData = None
+        self.model: CVAE | CondCVAE = None
+        self.model_dir: str | Path = None
         self.sample_key: str = None
+        self.data_dir: str | Path = None
 
-    def add_sdata(self, sdata) -> None:
+    def add_sdata(self, sdata: sd.SpatialData) -> None:
         """
         Add a SpatialData object to the Phenocoder instance.
 
@@ -69,18 +76,27 @@ class Phenocoder:
         """
         pass
 
-    def train_model(self):
+    def load_model(self):
         """
-        Train a Phenocoder model.
+        Load a Phenocoder model.
 
         Returns:
         None
         """
         pass
 
-    def load_model(self):
+    def initialize_model(self):
         """
-        Load a Phenocoder model.
+        Initialize a Phenocoder model.
+
+        Returns:
+        None
+        """
+        pass
+
+    def train(self, **kwargs):
+        """
+        Train a Phenocoder model.
 
         Returns:
         None
@@ -105,7 +121,7 @@ class Phenocoder:
         """
         pass
 
-    def generate_spatialgraph_stats(self):
+    def spatialgraph_stats(self):
         """
         Generate spatial graph statistics for each sample.
 

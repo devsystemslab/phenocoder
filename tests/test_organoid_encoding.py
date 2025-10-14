@@ -1,5 +1,4 @@
 from phenocoder.phenocode import encode_nuclei_patches, encode_grid_patches, merge_adata
-from phenocoder.plot import plot_organoid_test
 import numpy as np
 from skimage.color import label2rgb
 from skimage.util import montage
@@ -30,8 +29,6 @@ def test_nuclei_patch_encoding():
     )
 
     adata = merge_adata(adata_source, adata_target)
-    plot_organoid_test(adata, res=0.5)
-    plot_organoid_test(adata, res=0.5, layer='message_passing')
 
 
 def test_grid_encoding():

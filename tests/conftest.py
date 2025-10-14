@@ -6,10 +6,6 @@ import os
 from skimage import io
 import numpy as np
 
-# TODO:
-# - setup example data for 2d and 3d imaging data
-# - generate individual spatial data objects for each sample and generate merged spatial data from it
-
 
 @pytest.fixture
 def get_metadata(dir_images: str, regex: str = None) -> pd.DataFrame:
@@ -30,35 +26,44 @@ def get_metadata(dir_images: str, regex: str = None) -> pd.DataFrame:
     return df
 
 
-@pytest.fixture
-def data_dir(dims: int):
-    """Reusable path to test data"""
-    if dims == 2:
-        return Path(__file__).parent / 'data' / '2d'
-    elif dims == 3:
-        return Path(__file__).parent / 'data' / '3d'
-    else:
-        raise ValueError('dims must be 2 or 3.')
+@pytest.fixture(scope='module')
+def example_imgs():
+    """Factory that creates image arrays based on dimensions"""
+
+    def _load_images(dims: str = '2d'):
+        if dims == '2d':
+            dir_images = Path(__file__).parent / 'data' / '2d' / 'imgs'
+        elif dims == '3d':
+            dir_images = Path(__file__).parent / 'data' / '3d' / 'imgs'
+        else:
+            raise ValueError('dims must be "2d" or "3d".')
+
+        imgs = np.asarray(
+            [
+                io.imread(Path(dir_images, file))
+                for file in sorted(os.listdir(dir_images))
+            ]
+        )
+        return imgs
+
+    return _load_images
 
 
 @pytest.fixture
-def sample_data(dims: int):
+def sample_data_2d(example_imgs):
     """
-    Generate sample data from tiff files.
+    Generate example 2d data from tiff files.
     """
-    if dims in (2, 3):
-        df_images = get_metadata(data_dir(dims))
-    else:
-        raise ValueError('dims must be 2 or 3.')
-    # read images
-    df_images['image'] = df_images.apply(
-        lambda row: io.imread(row['dir_images'] + '/' + row['file']), axis=1
-    )
-    imgs = np.asarray(df_images['image'])
-    if dims == 2:
-        imgs_sd = Image2DModel()
-        imgs_sd = imgs_sd.parse(imgs)
-    if dims == 3:
-        imgs_sd = Image3DModel()
-        imgs_sd = imgs_sd.parse(imgs)
-    return imgs_sd
+    imgs = Image2DModel()
+    imgs = imgs.parse(example_imgs('2d'), dims=['c', 'y', 'x'])
+    return imgs
+
+
+@pytest.fixture
+def sample_data_3d(example_imgs):
+    """
+    Generate example 3d data from tiff files.
+    """
+    imgs = Image3DModel()
+    imgs = imgs.parse(example_imgs('3d'), dims=['c', 'z', 'y', 'x'])
+    return imgs

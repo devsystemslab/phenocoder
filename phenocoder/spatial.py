@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 
 def get_chull(
     adata: ad.AnnData,
-    well: str,
-    plate: str,
+    sample: str,
+    sample_key: str,
     radius: int = 100,
     degree_threshold: int = 5,
     filter_obs: bool = False,
@@ -21,8 +21,8 @@ def get_chull(
 ) -> float:
     """
     Get convex hull volume
-    :param well:
-    :param plate:
+    :param sample:
+    :param sample_key:
     :param adata:
     :param radius:
     :param degree_threshold:
@@ -31,14 +31,13 @@ def get_chull(
     :return:
     """
     if filter_obs:
-        adata = adata[adata.obs['plate'] == plate]
-        adata = adata[adata.obs['well'] == well]
+        adata = adata[adata.obs[sample_key] == sample]
     coordinate_cols = ['z', 'centroid-0', 'centroid-1']
     df = adata.obs[coordinate_cols]
     if len(df) < 4:
         return pd.DataFrame(
             {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-            index=[well + '_' + plate],
+            index=[sample],
         )
     pts = df.to_numpy()
     # neighbor graph
@@ -55,19 +54,19 @@ def get_chull(
     if len(df_filtered) < 4:
         return pd.DataFrame(
             {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-            index=[well + '_' + plate],
+            index=[sample],
         )
     pts = df_filtered[coordinate_cols].to_numpy()
     for i in range(pts.shape[-1]):
         if len(np.unique(pts[:, i])) == 1:
             return pd.DataFrame(
                 {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[well + '_' + plate],
+                index=[sample],
             )
     chull = ConvexHull(pts)
     df_results = pd.DataFrame(
         {'volume_chull': chull.volume, 'area_chull': chull.area},
-        index=[well + '_' + plate],
+        index=[sample],
     )
     if convert_units:
         df_results['volume_chull'] = (
@@ -409,8 +408,8 @@ def get_moran_cluster(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
 
 
 def get_spatial_stats(
-    well: str,
-    plate: str,
+    sample: str,
+    sample_key: str,
     adata: ad.AnnData,
     radii: tuple[int] = (25, 50, 100, 150),
     radius_chull: int = 100,
@@ -428,8 +427,7 @@ def get_spatial_stats(
     :param cluster_key: str cluster key
     :return:
     """
-    adata = adata[adata.obs['well_id'] == well]
-    adata = adata[adata.obs['plate_id'] == plate]
+    adata = adata[adata.obs[sample_key] == sample]
     adata = adata.copy()
     if layer is not None:
         adata.X = adata.layers[layer].copy()
@@ -450,12 +448,12 @@ def get_spatial_stats(
         # calculate spatial features
         df_spatial_features = pd.concat(
             [
-                get_interactions(adata, well, plate),
-                get_centrality(adata, well, plate),
-                get_connectivity(adata, well, plate),
-                get_moran(adata, well, plate),
-                get_moran_cluster(adata, well, plate),
-                get_neighborhood_enrichment(adata, well, plate),
+                get_interactions(adata, sample),
+                get_centrality(adata, sample),
+                get_connectivity(adata, sample),
+                get_moran(adata, sample),
+                get_moran_cluster(adata, sample),
+                get_neighborhood_enrichment(adata, sample),
             ],
             axis=1,
         )
@@ -466,7 +464,8 @@ def get_spatial_stats(
         df.append(df_spatial_features)
 
     df = pd.concat(df, axis=1)
-    df_chull = get_chull(adata, well, plate, radius=radius_chull)
+    df_chull = get_chull(adata, sample, radius=radius_chull)
+    # TODO: add chull connected components here, default for each cluster individual, however groupings as dict as additional option
     df = pd.concat([df, df_chull], axis=1)
     return df
 

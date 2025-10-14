@@ -7,3 +7,4 @@ uv.lock
 */__pycache__/
 build/
 phenocoder.egg-info/
+sdata/
