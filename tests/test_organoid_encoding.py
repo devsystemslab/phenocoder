@@ -1,4 +1,8 @@
-from phenocoder.phenocode import encode_nuclei_patches, encode_grid_patches, merge_adata
+from phenocoder._phenocode import (
+    encode_nuclei_patches,
+    encode_grid_patches,
+    merge_adata,
+)
 import numpy as np
 from skimage.color import label2rgb
 from skimage.util import montage

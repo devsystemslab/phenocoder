@@ -9,6 +9,7 @@ import anndata as ad
 import matplotlib.pyplot as plt
 
 
+# TODO: write spatial_graph stat class instead of having all function individually. keep funcionality to use the module outside of Phenocoder class
 def get_chull(
     adata: ad.AnnData,
     sample: str,

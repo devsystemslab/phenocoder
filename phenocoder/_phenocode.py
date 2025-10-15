@@ -11,6 +11,7 @@ import re
 from scipy.sparse import csr_array
 
 
+# TODO: refactor into phenocoder class.
 def load_config(model_config):
     """
     Load model config

@@ -1,5 +1,5 @@
 from phenocoder.utils import average_matched_nuclei
-from phenocoder.phenocode import encode_nuclei_patches
+from phenocoder._phenocode import encode_nuclei_patches
 from pathlib import Path
 import muon as mu
 import numpy as np

@@ -1,4 +1,4 @@
-from phenocoder.phenocode import encode_nuclei_patches
+from phenocoder._phenocode import encode_nuclei_patches
 
 
 def test_predict():

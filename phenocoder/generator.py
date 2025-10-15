@@ -10,6 +10,8 @@ from sklearn.preprocessing import OneHotEncoder
 from tqdm import tqdm
 
 
+# TODO: rewrite for compatibility with sdata and remove dataset specific stuff
+# checkout redundancies between classes and unify as much as possible.
 class DatasetGenerator:
     """
     DatasetGenerator

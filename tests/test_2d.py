@@ -54,7 +54,7 @@ sdata = sd.SpatialData(
 sdata.shapes['nuclei_shapes'] = sd.to_polygons(sdata.labels['nuclei'])
 
 # write sdata to tests/data/2d
-sdata.write(Path('tests/data/2d', 'sdata'))
+sdata.write(Path('tests/data/2d', 'sdata'), overwrite=True)
 
 # setup phenocoder
 pheno = phc.Phenocoder()

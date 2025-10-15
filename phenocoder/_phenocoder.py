@@ -6,7 +6,7 @@ from pathlib import Path
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.generator import DatasetGenerator, NucleiPatchGenerator, DatasetMerger
 from phenocoder.train import train_model
-from phenocoder.phenocode import encode_nuclei_patches
+from phenocoder._phenocode import encode_nuclei_patches
 from phenocoder.spatial import run_spatial_feature_processing
 from phenocoder._cluster import run_clustering
 
