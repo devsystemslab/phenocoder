@@ -1,318 +1,281 @@
 import os
-from concurrent.futures import ThreadPoolExecutor
-import matplotlib.pyplot as plt
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from keras.utils import Sequence
-from skimage import io
-from skimage.util import view_as_windows
 from sklearn.preprocessing import OneHotEncoder
 from tqdm import tqdm
 
 
-# TODO: rewrite for compatibility with sdata and remove dataset specific stuff
-# checkout redundancies between classes and unify as much as possible.
-class DatasetGenerator:
+class PatchGenerator:
     """
-    DatasetGenerator
+    Generator for image patches and image patch datasets from spatial data.
+
+    This class handles the extraction of image patches and their statistics
+    from spatial data objects, primarily for use in deep learning workflows.
     """
 
     def __init__(
         self,
-        dir_input,
-        dir_output,
-        max_workers=12,
-        mode='grid',
-        dir_segmented=None,
-        channels=['01', '02', '03', '04'],
+        dataset: str,
+        sdata,
+        image_key: str,
+        spatial_key: str,
+        table_key: str,
+        sample_key: str,
+        dir_output: str | Path,
+        max_workers: int = 12,
     ):
         """
-        Initialize DatasetGenerator
-        :param dir_input:
-        :param dir_output:
-        :param max_workers:
-        :param dir_segmented:
+        Initialize DatasetGenerator.
+
+        Parameters
+        ----------
+        sdata : SpatialData
+            Spatial data object containing images and tables
+        image_key : str
+            Key for accessing images in sdata.images
+        spatial_key : str
+            Key for accessing spatial coordinates in sdata.tables
+        table_key : str
+            Key for accessing tables in sdata.tables
+        sample_key : str
+            Key for sample identification in observations
+        dir_output : str or Path
+            Output directory for generated datasets
+        max_workers : int, default 12
+            Maximum number of worker threads for parallel processing
         """
+        self.sdata = sdata
+        self.image_key = image_key
+        self.channels = self.sdata.images[image_key].coords['c'].values.tolist()
+        self.spatial_key = spatial_key
+        self.table_key = table_key
+        self.sample_key = sample_key
         self.max_workers = max_workers
-        self.mode = mode
-        self.dir_input = dir_input
-        self.dir_output = dir_output
-        self.dir_segmented = dir_segmented
-        self.dir_dataset = os.path.join(dir_output, 'dataset')
+        self.dir_output = Path(dir_output)
+        self.dir_dataset = Path(dir_output, dataset)
         self.df_images = None
-        self.df_stats = pd.DataFrame()
+        self.df_stats_img = pd.DataFrame()
         self.df_stats_patches = pd.DataFrame()
         self.df_stats_patches_sampled = None
-        self.image_size = (3814, 3814)
+        self.image_size = self.sdata.images[self.image_key].shape[-2:]
         self.patch_size = (128, 128)
-        self.patch_positions = None
-        self.channels = channels
+        self.patches = None
         self.ids = None
-
-    def get_metadata(self, path) -> pd.DataFrame:
-        """
-        Get metadata
-        :param path:
-        :return:
-        """
-        images = os.listdir(path)
-        images = [image for image in images if '.tif' in image]
-        regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
-        df = pd.DataFrame({'file': images, 'dir_images': str(path)})
-        df = df.join(df['file'].str.extractall(regex).groupby(level=0).last())
-        df['id'] = df['well_id'] + '_' + df['z_stack_id']
-        # remove rows that have nan in any column
-        df = df[~df.isna().any(axis=1)]
-        return df
-
-    def init_metadata(self):
-        """
-        Initialize metadata
-        :return:
-        """
-        if self.dir_input is not None:
-            self.df_images = self.get_metadata(self.dir_input)
 
     def init_output(self):
         """
-        Initialize output directories
-        :return:
-        """
-        os.makedirs(self.dir_output, exist_ok=True)
-        os.makedirs(self.dir_dataset, exist_ok=True)
+        Initialize output directories.
 
-    def init_ids(self, sampling_frac=None, qc_path=None):
+        Creates the main output directory and dataset subdirectory if they
+        don't already exist.
         """
-        Initialize ids
-        :param sampling_frac:
-        :return:
-        """
-        # filter ids from excluded wells
-        if qc_path is not None:
-            df = pd.read_csv(qc_path)
-            bad_wells = df[df['decision'] == 'bad']['well_id'].tolist()
-            print(bad_wells)
-            self.df_images = self.df_images[~self.df_images['well_id'].isin(bad_wells)]
+        self.dir_output.mkdir(exist_ok=True, parents=True)
+        self.dir_dataset.mkdir(exist_ok=True, parents=True)
 
-        self.ids = self.df_images['id'].unique()
+    def init_samples(self, sampling_frac=None):
+        """
+        Initialize sample IDs for processing.
+
+        Parameters
+        ----------
+        sampling_frac : float, optional
+            Fraction of samples to randomly select. If None, uses all samples.
+        """
+
+        self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
         if sampling_frac is not None:
-            self.ids = np.random.choice(
-                self.ids, int(sampling_frac * len(self.ids)), replace=False
+            self.samples = np.random.choice(
+                self.samples, int(sampling_frac * len(self.samples)), replace=False
             )
 
-    def init_patch_positions(self):
+    def init_patches(self):
         """
-        Initialize patch positions from image size and patch size
-        :return:
-        """
-        patch_positions = []
-        self.patch_positions = []
-        if self.mode == 'grid':
-            for i in range(
-                0, self.image_size[0] - self.patch_size[0], self.patch_size[0]
-            ):
-                for j in range(
-                    0, self.image_size[1] - self.patch_size[1], self.patch_size[1]
-                ):
-                    patch_positions.append((i, j))
-            for i in self.ids:
-                df = pd.DataFrame(patch_positions, columns=['x', 'y']).assign(id=i)
-                self.patch_positions.append(df)
-            self.patch_positions = pd.concat(self.patch_positions).reset_index(
-                drop=True
-            )
+        Initialize patch positions from spatial coordinates.
 
-        if self.mode == 'segmented':
-            for i in tqdm(self.ids, desc='Reading positions'):
-                file = os.path.join(self.dir_segmented, f'{i}.csv')
-                if os.path.exists(file):
-                    df = pd.read_csv(file).assign(id=i)
-                    self.patch_positions.append(df)
-            self.patch_positions = pd.concat(
-                [df for df in self.patch_positions if not df.empty]
-            )
-            self.patch_positions = self.patch_positions.rename(
-                columns={'centroid-0': 'y', 'centroid-1': 'x'}
-            )
-            # round to integer
-            self.patch_positions['x'] = self.patch_positions['x'].astype(int)
-            self.patch_positions['y'] = self.patch_positions['y'].astype(int)
-            # drop other columns than id, x and y
-            self.patch_positions = self.patch_positions[['id', 'x', 'y']]
-            # filter x and y that are within image boundaries when patch size is added
-            x_min, x_max = (
-                self.patch_size[0] // 2,
-                self.image_size[1] - self.patch_size[0] // 2,
-            )
-            y_min, y_max = (
-                self.patch_size[0] // 2,
-                self.image_size[0] - self.patch_size[0] // 2,
-            )
-            self.patch_positions = self.patch_positions[
-                (self.patch_positions['x'] >= x_min)
-                & (self.patch_positions['x'] <= x_max)
-                & (self.patch_positions['y'] >= y_min)
-                & (self.patch_positions['y'] <= y_max)
-            ]
-
-        self.patch_positions['batch_id'] = np.arange(0, len(self.patch_positions))
-
-    def load_image(self, file):
+        Extracts spatial coordinates from the data, filters positions that
+        would result in patches extending beyond image boundaries, and
+        assigns batch IDs.
         """
-        Load image
-        :param file:
-        :return:
+        self.patches = pd.DataFrame(
+            self.sdata.tables[self.table_key].obsm[self.spatial_key],
+            columns=['y', 'x', 'z'],
+            index=self.sdata.tables[self.table_key].obs.index,
+        )
+        self.patches[self.sample_key] = self.sdata.tables[self.table_key].obs[
+            self.sample_key
+        ]
+        # round to integer
+        self.patches['x'] = self.patches['x'].astype(int)
+        self.patches['y'] = self.patches['y'].astype(int)
+
+        # filter x and y that are within image boundaries when patch size is added
+        x_min, x_max = (
+            self.patch_size[0] // 2,
+            self.image_size[1] - self.patch_size[0] // 2,
+        )
+        y_min, y_max = (
+            self.patch_size[0] // 2,
+            self.image_size[0] - self.patch_size[0] // 2,
+        )
+        self.patches = self.patches[
+            (self.patches['x'] >= x_min)
+            & (self.patches['x'] <= x_max)
+            & (self.patches['y'] >= y_min)
+            & (self.patches['y'] <= y_max)
+        ]
+
+        self.patches['id'] = np.arange(0, len(self.patches))
+
+    def load_image(self, image_key):
         """
-        image_path = os.path.join(self.dir_input, file)
-        image = io.imread(image_path)
+        Load image from spatial data.
+
+        Parameters
+        ----------
+        image_key : str
+            Key for accessing the image in sdata.images
+
+        Returns
+        -------
+        ndarray
+            Loaded image array
+        """
+        image = np.asarray(self.sdata.images[image_key])
         return image
 
-    def extract_patch(self, img, batch_id):
+    def extract_patch(
+        self, img, id, scale=False, quantiles_high=None, quantiles_low=None
+    ):
         """
-        Extract patch from image
-        :param img:
-        :param batch_id:
-        :return:
+        Extract a patch from an image centered on specified coordinates.
+
+        Parameters
+        ----------
+        img : ndarray
+            Input image array
+        id : int
+            Batch ID corresponding to patch position
+
+        Returns
+        -------
+        ndarray
+            Extracted image patch
         """
-        if self.mode == 'grid':
-            x = int(
-                self.patch_positions[self.patch_positions['batch_id'] == batch_id][
-                    'x'
-                ].iloc[0]
-            )
-            x_max = x + self.patch_size[0]
-            y = int(
-                self.patch_positions[self.patch_positions['batch_id'] == batch_id][
-                    'y'
-                ].iloc[0]
-            )
-            y_max = int(y) + self.patch_size[1]
-            img = img[y:y_max, x:x_max, :]
+        # extract patch centered on x and y
+        x = int(self.patches[self.patches['id'] == id]['x'].iloc[0])
+        y = int(self.patches[self.patches['id'] == id]['y'].iloc[0])
+        if img.ndim == 4:
+            z = int(self.patches[self.patches['id'] == id]['z'].iloc[0])
+            img = img[:, z, ...]
+        x_max = x + self.patch_size[0] // 2
+        y_max = y + self.patch_size[1] // 2
+        x_min = x - self.patch_size[0] // 2
+        y_min = y - self.patch_size[1] // 2
+        img = img[:, y_min:y_max, x_min:x_max]
+        assert img.shape[-2:] == self.patch_size
+        if scale:
+            if quantiles_high is None or quantiles_low is None:
+                raise ValueError('Quantiles need to be provided for scaling')
+            img = img.astype(np.float32)
+            for i in range(img.shape[-1]):
+                img[..., i] = np.clip(
+                    (img[..., i] - quantiles_low[i])
+                    / (quantiles_high[i] - quantiles_low[i]),
+                    0,
+                    1,
+                )
+            img = img.astype(np.float32)
 
-        if self.mode == 'segmented':
-            # extract patch centered on x and y
-            x = int(
-                self.patch_positions[self.patch_positions['batch_id'] == batch_id][
-                    'x'
-                ].iloc[0]
-            )
-            y = int(
-                self.patch_positions[self.patch_positions['batch_id'] == batch_id][
-                    'y'
-                ].iloc[0]
-            )
-            x_max = x + self.patch_size[0] // 2
-            y_max = y + self.patch_size[1] // 2
-            x_min = x - self.patch_size[0] // 2
-            y_min = y - self.patch_size[1] // 2
-            img = img[y_min:y_max, x_min:x_max, :]
-
-        assert img.shape[:-1] == self.patch_size
         return img
 
     def __get_image_stats__(self, imgs, id, id_name):
         """
-        Get image statistics
-        :param imgs:
-        :param id:
-        :param id_name:
-        :return:
+        Calculate comprehensive statistics for image data.
+
+        Parameters
+        ----------
+        imgs : ndarray
+            Input image array
+        id : str or int
+            Identifier for the image/patch
+        id_name : str
+            Name of the ID column
+
+        Returns
+        -------
+        DataFrame
+            Statistics for each channel including mean, std, quantiles, etc.
         """
-        mean = np.mean(imgs, axis=(0, 1))
-        std = np.std(imgs, axis=(0, 1))
-        median = np.median(imgs, axis=(0, 1))
-        mad = np.median(np.abs(imgs - np.median(imgs)), axis=(0, 1))
-        max = np.max(imgs, axis=(0, 1))
-        min = np.min(imgs, axis=(0, 1))
-        quantile_low = np.percentile(imgs, 1, axis=(0, 1))
-        quantile_high = np.percentile(imgs, 99, axis=(0, 1))
-        df = pd.DataFrame(
-            {
-                id_name: id,
-                'channel': self.channels,
-                'mean': mean,
-                'std': std,
-                'quantile_high': quantile_high,
-                'quantile_low': quantile_low,
-                'median': median,
-                'mad': mad,
-                'max': max,
-                'min': min,
-            }
+        if imgs.ndim == 3:
+            imgs = imgs[:, np.newaxis, :, :]
+
+        mean = np.mean(imgs, axis=(-2, -1))
+        std = np.std(imgs, axis=(-2, -1))
+        median = np.median(imgs, axis=(-2, -1))
+        mad = np.median(np.abs(imgs - np.median(imgs)), axis=(-2, -1))
+        max = np.max(imgs, axis=(-2, -1))
+        min = np.min(imgs, axis=(-2, -1))
+        quantile_low = np.percentile(imgs, 1, axis=(-2, -1))
+        quantile_high = np.percentile(imgs, 99, axis=(-2, -1))
+
+        df = pd.concat(
+            [
+                pd.DataFrame(
+                    {
+                        id_name: id,
+                        'channel': self.channels[i],
+                        'z': np.arange(imgs.shape[1]),
+                        'mean': mean[i],
+                        'std': std[i],
+                        'quantile_high': quantile_high[i],
+                        'quantile_low': quantile_low[i],
+                        'median': median[i],
+                        'mad': mad[i],
+                        'max': max[i],
+                        'min': min[i],
+                    }
+                )
+                for i in range(len(self.channels))
+            ]
         )
+
         return df
 
-    def generate_patch_stats(self, sample_id):
+    def generate_image_stats(self, sample_id):
         """
-        Generate patch statistics
-        :param sample_id:
-        :return:
+        Generate statistics for all patches in a sample.
+
+        Parameters
+        ----------
+        sample_id : str or int
+            Sample identifier for which to generate statistics
         """
-        df_batch_positions = self.patch_positions[
-            self.patch_positions['id'] == sample_id
-        ]
-        if len(df_batch_positions) > 0:
-            df_batch_images = self.df_images[self.df_images['id'] == sample_id]
-            # filter for channels
-            df_batch_images = df_batch_images[
-                df_batch_images['channel_id'].isin(self.channels)
-            ]
-            # sort by channel
-            df_batch_images = df_batch_images.sort_values(
-                by=['channel_id'], ascending=True
-            )
+        df_patch_positions = self.patches[self.patches[self.sample_key] == sample_id]
+        if len(df_patch_positions) > 0:
             # load images
-            imgs = np.asarray(
-                [self.load_image(file) for file in df_batch_images['file']]
-            )
-            imgs = np.moveaxis(imgs, 0, -1)
-            df_stat = self.__get_image_stats__(imgs, sample_id, 'id')
+            imgs = np.asarray(self.sdata.images[self.image_key])
+            df_stat = self.__get_image_stats__(imgs, sample_id, 'sample_id')
             self.df_stats = pd.concat([self.df_stats, df_stat])
-            patches = [
-                self.extract_patch(imgs, batch_id)
-                for batch_id in df_batch_positions['batch_id']
-            ]
-            # get patch stats
-            df_stat_patches = pd.concat(
-                [
-                    self.__get_image_stats__(patch, batch_id, 'batch_id')
-                    for patch, batch_id in zip(patches, df_batch_positions['batch_id'])
-                ]
-            )
-            df_stat_patches['id'] = sample_id
-            # left merge with df_batch_positions
-            df_stat_patches = df_stat_patches.merge(
-                df_batch_positions, on=['batch_id', 'id'], how='left'
-            )
-            df_stat_patches['file'] = (
-                df_stat_patches['id'].astype(str)
-                + '_'
-                + df_stat_patches['batch_id'].astype(str)
-                + '.npy'
-            )
-            # add to self.df_stats_patches
-            self.df_stats_patches = pd.concat([self.df_stats_patches, df_stat_patches])
 
     def write_patches(self, sample_id):
         """
-        Write patches to disk
-        :param sample_id:
-        :return:
+        Write extracted patches to disk as numpy arrays.
+
+        Parameters
+        ----------
+        sample_id : str or int
+            Sample identifier for which to write patches
         """
+
         # get all files that need to be written
         df_patches_sample = self.df_stats_patches_sampled[
             self.df_stats_patches_sampled['id'] == sample_id
         ]
-        df_images_sample = self.df_images[self.df_images['id'] == sample_id]
-        # filter for channels
-        df_batch_images = df_images_sample[
-            df_images_sample['channel_id'].isin(self.channels)
-        ]
-        # sort by channel
-        df_batch_images = df_batch_images.sort_values(by=['channel_id'], ascending=True)
         # load images
-        imgs = np.asarray([self.load_image(file) for file in df_batch_images['file']])
-        imgs = np.moveaxis(imgs, 0, -1)
+        imgs = np.asarray(self.sdata.images[self.image_key])
         patches = [
             self.extract_patch(imgs, batch_id)
             for batch_id in df_patches_sample['batch_id']
@@ -328,508 +291,144 @@ class DatasetGenerator:
         self,
         sampling_frac=None,
         n_patches=None,
-        n_bins=20,
-        per_channel=False,
-        qc_path=None,
     ):
         """
-        Generate dataset
-        :param sampling_frac:
-        :param n_patches:
-        :param n_bins:
-        :param per_channel:
-        :return:
+        Generate complete dataset with patches and statistics.
+
+        Parameters
+        ----------
+        sampling_frac : float, optional
+            Fraction of samples to process
+        n_patches : int, optional
+            Number of patches to sample from all available patches
         """
-        self.init_metadata()
         self.init_output()
-        self.init_ids(sampling_frac=sampling_frac, qc_path=qc_path)
-        self.init_patch_positions()
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            list(
-                tqdm(
-                    executor.map(self.generate_patch_stats, self.ids),
-                    desc='Generating patch statistics',
-                    total=len(self.ids),
-                )
-            )
-        self.sample_patches(n_patches=n_patches, n_bins=n_bins, per_channel=per_channel)
+        self.init_samples(sampling_frac=sampling_frac)
+        self.init_patches()
+        [
+            self.generate_image_stats(sample)
+            for sample in tqdm(self.samples, desc='Generating patch statistics')
+        ]
+        self.sample_patches(n_patches=n_patches)
         # set ids to sampled ids
-        self.ids = self.df_stats_patches_sampled['id'].unique()
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            list(
-                tqdm(
-                    executor.map(self.write_patches, self.ids),
-                    desc='Writing sampled patches',
-                    total=len(self.ids),
-                )
+        self.samples = self.df_stats_patches_sampled['id'].unique()
+        [
+            self.write_patches(id)
+            for id in tqdm(self.samples, desc='Writing sampled patches')
+        ]
+
+    def sample_patches(self, n_patches=None):
+        """
+        Sample a subset of patches for training.
+
+        Parameters
+        ----------
+        n_patches : int, optional
+            Number of patches to sample. If None or greater than available
+            patches, uses all patches.
+        """
+        if n_patches is None or n_patches > len(self.df_stats_patches):
+            self.df_stats_patches_sampled = self.df_stats_patches.copy()
+        else:
+            self.df_stats_patches_sampled = self.df_stats_patches.sample(
+                n_patches, replace=False
             )
-
-    def sample_patches(self, n_patches=None, n_bins=20, per_channel=False):
-        """
-        Sample patches from imgs_train for uniform distribution of mean intensity
-        :param n_patches:
-        :param n_bins:
-        :param per_channel:
-        :return:
-        """
-        if self.mode == 'grid':
-            if n_patches is None:
-                n_patches = len(self.df_stats_patches['file'].unique())
-            indexes_sampled = []
-            if per_channel:
-                for channel_id in self.df_stats_patches['channel'].unique():
-                    df = self.df_stats_patches[
-                        self.df_stats_patches['channel'] == channel_id
-                    ]
-                    mean_intensity = df['mean']
-                    # get quantiles
-                    quantiles = np.histogram(mean_intensity, bins=n_bins)[1]
-                    for i in tqdm(range(1, len(quantiles)), desc='Sampling patches'):
-                        idx = np.where(
-                            (mean_intensity >= quantiles[i - 1])
-                            & (mean_intensity < quantiles[i])
-                        )[0]
-                        if len(idx) == 0:
-                            continue
-                        weight = 1 / (len(idx) / len(mean_intensity))
-                        n_patches_quant = int(n_patches * weight)
-                        # shuffle idx
-                        np.random.shuffle(idx)
-                        idx = idx[:n_patches_quant]
-                        indexes_sampled.extend(df.iloc[idx].index.tolist())
-
-            else:
-                mean_intensity = self.df_stats_patches['mean']
-                # get quantiles
-                quantiles = np.histogram(mean_intensity, bins=n_bins)[1]
-                for i in tqdm(range(1, len(quantiles)), desc='Sampling patches'):
-                    idx = np.where(
-                        (mean_intensity >= quantiles[i - 1])
-                        & (mean_intensity < quantiles[i])
-                    )[0]
-                    if len(idx) == 0:
-                        continue
-                    weight = 1 / (len(idx) / len(mean_intensity))
-                    n_patches_quant = int(n_patches * weight)
-                    # shuffle idx
-                    np.random.shuffle(idx)
-                    idx = idx[:n_patches_quant]
-                    indexes_sampled.extend(idx)
-            # unique indexes
-            indexes_sampled = list(set(indexes_sampled))
-            self.df_stats_patches_sampled = self.df_stats_patches.iloc[
-                indexes_sampled
-            ].copy()
-        if self.mode == 'segmented':
-            if n_patches is None or n_patches > len(self.df_stats_patches):
-                self.df_stats_patches_sampled = self.df_stats_patches.copy()
-            else:
-                self.df_stats_patches_sampled = self.df_stats_patches.sample(
-                    n_patches, replace=False
-                )
 
     def save_stats(self):
         """
-        Save statistics
-        :return:
+        Save computed statistics to CSV files.
+
+        Saves image statistics, patch statistics, and sampled patch
+        statistics to separate CSV files in the output directory.
         """
-        self.df_stats.to_csv(os.path.join(self.dir_output, 'stats.csv'), index=False)
+        self.df_stats.to_csv(Path(self.dir_dataset, 'stats.csv'), index=False)
         self.df_stats_patches.to_csv(
-            os.path.join(self.dir_output, 'stats_patches.csv'), index=False
+            Path(self.dir_dataset, 'stats_patches.csv'), index=False
+        )
+        print(
+            f'Patch statistics saved to: {Path(self.dir_dataset, "stats_patches.csv")}'
         )
         if self.df_stats_patches_sampled is not None:
             self.df_stats_patches_sampled.to_csv(
-                os.path.join(self.dir_output, 'stats_patches_sampled.csv'), index=False
+                Path(self.dir_dataset, 'stats_patches_sampled.csv'), index=False
+            )
+            print(
+                f'Sampled patch statistics saved to: {Path(self.dir_dataset, "stats_patches_sampled.csv")}'
             )
 
-    def load_stats(self):
-        """
-        Load statistics
-        :return:
-        """
-        file_stats = os.path.join(self.dir_output, 'stats.csv')
-        file_stats_patches = os.path.join(self.dir_output, 'stats_patches.csv')
-        file_stats_patches_sampled = os.path.join(
-            self.dir_output, 'stats_patches_sampled.csv'
-        )
-        if os.path.exists(file_stats):
-            self.df_stats = pd.read_csv(file_stats)
-        if os.path.exists(file_stats_patches):
-            self.df_stats_patches = pd.read_csv(file_stats_patches)
-        if os.path.exists(file_stats_patches_sampled):
-            self.df_stats_patches_sampled = pd.read_csv(file_stats_patches_sampled)
 
-    def plot_stats(self, sampled=False):
-        """
-        Plot statistics
-        :param sampled:
-        :return:
-        """
-        # Group by channel
-        if sampled and self.df_stats_patches_sampled is not None:
-            df_grouped = self.df_stats_patches_sampled.copy()
-        else:
-            df_grouped = self.df_stats_patches.copy()
-        df_grouped = df_grouped.groupby('channel')
-
-        # Define colors for each channel
-        colors = ['blue', 'green', 'red', 'purple']
-
-        # Plot histograms for each channel on the same plot
-        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-        fig.suptitle('Channel Statistics')
-
-        for (channel, group), color in zip(df_grouped, colors):
-            axes[0, 0].hist(
-                group['mean'],
-                bins=30,
-                alpha=0.7,
-                label=f'Channel {channel}',
-                color=color,
-            )
-            axes[0, 0].set_title('Mean')
-
-            axes[0, 1].hist(
-                group['std'],
-                bins=30,
-                alpha=0.7,
-                label=f'Channel {channel}',
-                color=color,
-            )
-            axes[0, 1].set_title('Standard Deviation')
-
-            axes[1, 0].hist(
-                group['quantile_high'],
-                bins=30,
-                alpha=0.7,
-                label=f'Channel {channel}',
-                color=color,
-            )
-            axes[1, 0].set_title('Quantile High')
-
-            axes[1, 1].hist(
-                group['quantile_low'],
-                bins=30,
-                alpha=0.7,
-                label=f'Channel {channel}',
-                color=color,
-            )
-            axes[1, 1].set_title('Quantile Low')
-
-        for ax in axes.flat:
-            ax.legend()
-            ax.set_xlabel('Value')
-            ax.set_ylabel('Frequency')
-
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.show()
-
-
-class DatasetMerger:
+class DatasetLoader:
     """
-    DatasetMerger
+    Utility class for merging multiple datasets and their statistics.
+
+    This class combines statistics from multiple dataset directories and
+    provides unified access to files and scaling parameters.
     """
 
     def __init__(self, datasets: list, dir_datasets: str):
         """
-        Initialize DatasetMerger
-        :param datasets:
-        :param dir_datasets:
+        Initialize DatasetMerger.
+
+        Parameters
+        ----------
+        datasets : list
+            List of dataset names to merge
+        dir_datasets : str
+            Base directory containing dataset subdirectories
         """
         self.dir_datasets = dir_datasets
         self.datasets = datasets
-        self.stats = None
-        self.patch_stats = None
+        self.stats_imgs = None
+        self.patches = None
 
-    def merge_datasets(self):
+    def load_datasets(self):
         """
-        Merge datasets
-        :return:
+        Loads and merge statistics from all specified datasets.
+
+        Combines stats.csv and stats_patches_sampled.csv files from each
+        dataset directory and creates unified dataframes with file paths.
         """
         self.stats = []
-        self.patch_stats = []
         for dataset in self.datasets:
             self.stats.append(
-                pd.read_csv(
-                    os.path.join(self.dir_datasets, dataset, 'stats.csv')
-                ).assign(dataset=dataset)
-            )
-            self.patch_stats.append(
-                pd.read_csv(
-                    os.path.join(
-                        self.dir_datasets, dataset, 'stats_patches_sampled.csv'
-                    )
-                ).assign(dataset=dataset, dir_datasets=self.dir_datasets)
+                pd.read_csv(Path(self.dir_datasets, dataset, 'stats.csv')).assign(
+                    dataset=dataset
+                )
             )
         self.stats = pd.concat(self.stats)
-        self.patch_stats = pd.concat(self.patch_stats)
-        # generate file paths
-        self.patch_stats['file_path'] = self.patch_stats.apply(
-            lambda x: os.path.join(
-                x['dir_datasets'], x['dataset'], 'dataset', x['file']
-            ),
-            axis=1,
-        )
 
     def get_files(self):
         """
-        Get files
-        :return:
+        Get list of all patch files from merged datasets.
+
+        Returns
+        -------
+        list
+            List of unique file paths for all patches
         """
-        return self.patch_stats['file_path'].unique().tolist()
+        return self.patches['file_path'].unique().tolist()
 
     def get_scaling_stats(self):
         """
-        Get scaling statistics
-        :return:
+        Get scaling statistics across all datasets.
+
+        Returns
+        -------
+        tuple
+            Tuple of (quantiles_low, quantiles_high) for each channel,
+            representing the global min/max quantiles for normalization
         """
         quantiles_low = self.stats.groupby('channel')['quantile_low'].min()
         quantiles_high = self.stats.groupby('channel')['quantile_high'].max()
         return quantiles_low, quantiles_high
 
 
-class NucleiPatchGenerator:
+class SequenceGenerator(Sequence):
     """
-    NucleiPatchGenerator
-    """
+    Keras Sequence generator for loading image patches during training.
 
-    def __init__(self, dir_images):
-        """
-        Initialize NucleiPatchGenerator
-        :param dir_images:
-        """
-        self.df_images = self.get_metadata(dir_images)
-        self.patch_size = (128, 128)
-        self.image_size = (3814, 3814)
-
-    def get_metadata(self, path) -> pd.DataFrame:
-        """
-        Get metadata
-        :param path:
-        :return:
-        """
-        images = os.listdir(path)
-        images = [image for image in images if '.tif' in image]
-        regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
-        df = pd.DataFrame({'file': images, 'dir_images': str(path)})
-        df = df.join(df['file'].str.extractall(regex).groupby(level=0).last())
-        df['id'] = df['well_id'] + '_' + df['z_stack_id']
-        # remove rows that have nan in any column
-        df = df[~df.isna().any(axis=1)]
-        return df
-
-    def load_image(self, file):
-        """
-        Load image
-        :param file:
-        :return:
-        """
-        image = io.imread(file)
-        return image
-
-    def extract_patch_from_x_y(self, img, x, y):
-        """
-        Extract patch from x and y
-        :param img:
-        :param x:
-        :param y:
-        :return:
-        """
-        x_max = x + self.patch_size[0]
-        y_max = y + self.patch_size[1]
-        img = img[y:y_max, x:x_max, :]
-        return img
-
-    def get_patches(
-        self,
-        well_id,
-        df_nuclei,
-        scale=True,
-        quantiles_high=None,
-        quantiles_low=None,
-        channels=['01', '02', '03', '04'],
-    ):
-        """
-        Get patches
-        :param well_id:
-        :param df_nuclei:
-        :param scale:
-        :param quantiles_high:
-        :param quantiles_low:
-        :return:
-        """
-        df_well_images = self.df_images[self.df_images['well_id'] == well_id]
-        df_well_nuclei = df_nuclei[df_nuclei['well_id'] == well_id]
-        # adjust x,y to patch size
-        df_well_nuclei['x'] = (
-            df_well_nuclei['centroid-1'] - self.patch_size[1] / 2
-        ).astype(int)
-        df_well_nuclei['y'] = (
-            df_well_nuclei['centroid-0'] - self.patch_size[0] / 2
-        ).astype(int)
-        # filter out patches that exceed image boundaries
-        x_min, x_max = 0, self.image_size[1] - self.patch_size[1]
-        y_min, y_max = 0, self.image_size[0] - self.patch_size[0]
-        df_well_nuclei = df_well_nuclei[
-            (df_well_nuclei['x'] >= x_min)
-            & (df_well_nuclei['x'] <= x_max)
-            & (df_well_nuclei['y'] >= y_min)
-            & (df_well_nuclei['y'] <= y_max)
-        ]
-        patches = []
-        df = []
-        # load images
-        for z in tqdm(
-            df_well_images['z_stack_id'].unique().tolist(),
-            desc=f'Generating patches - {well_id}',
-            total=df_well_images['z_stack_id'].unique().shape[0],
-        ):
-            df_z_images = df_well_images[df_well_images['z_stack_id'] == z]
-            df_z_images = df_z_images.sort_values(by=['channel_id'], ascending=True)
-            df_z_images = df_z_images[df_z_images['channel_id'].isin(channels)]
-            df_z_nuclei = df_well_nuclei[df_well_nuclei['z'] == int(z)]
-            imgs = np.asarray(
-                [
-                    self.load_image(os.path.join(dir_image, file))
-                    for dir_image, file in zip(
-                        df_z_images['dir_images'], df_z_images['file']
-                    )
-                ]
-            )
-            imgs = np.moveaxis(imgs, 0, -1)
-            patches_z = [
-                self.extract_patch_from_x_y(imgs, x, y)
-                for x, y in zip(df_z_nuclei['x'], df_z_nuclei['y'])
-            ]
-            patches.extend(patches_z)
-            df.append(df_z_nuclei)
-        patches = np.asarray(patches)
-        if scale:
-            if quantiles_high is None or quantiles_low is None:
-                raise ValueError('Quantiles need to be provided for scaling')
-            patches = patches.astype(np.float32)
-            print(patches.shape[-1])
-            for i in range(patches.shape[-1]):
-                patches[..., i] = np.clip(
-                    (patches[..., i] - quantiles_low[i])
-                    / (quantiles_high[i] - quantiles_low[i]),
-                    0,
-                    1,
-                )
-            patches = patches.astype(np.float32)
-
-        df = pd.concat(df)
-        return patches, df
-
-
-class GridPatchGenerator:
-    """
-    GridPatchGenerator
-    """
-
-    def __init__(self, dir_images, patch_size=(128, 128), stride=128, quantiles=None):
-        """
-        Initialize GridPatchGenerator
-        :param dir_images:
-        :param patch_size:
-        :param stride:
-        :param quantiles:
-        """
-        self.dir_images = dir_images
-        self.patch_size = patch_size
-        self.stride = stride
-        self.quantiles = quantiles
-        self.image_size = (3814, 3814)
-        self.channels = ['01', '02', '03', '04']
-        self.df_images = self.get_metadata(dir_images)
-
-    def load_image(self, file):
-        """
-        Load image
-        :param file:
-        :return:
-        """
-        image = io.imread(file)
-        return image
-
-    def get_metadata(self, path) -> pd.DataFrame:
-        """
-        Get metadata
-        :param path:
-        :return:
-        """
-        images = os.listdir(path)
-        images = [image for image in images if '.tif' in image]
-        regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
-        df = pd.DataFrame({'file': images, 'dir_images': str(path)})
-        df = df.join(df['file'].str.extractall(regex).groupby(level=0).last())
-        df['id'] = df['well_id'] + '_' + df['z_stack_id']
-        # remove rows that have nan in any column
-        df = df[~df.isna().any(axis=1)]
-        return df
-
-    def get_patches(self, well_id, quantiles=None):
-        """
-        Get patches
-        :param well_id:
-        :param quantiles:
-        :return:
-        """
-        df_well_images = self.df_images[self.df_images['well_id'] == well_id]
-        patches = []
-        df = []
-        # load images
-        for z in tqdm(
-            df_well_images['z_stack_id'].unique().tolist(),
-            desc=f'Generating patches - {well_id}',
-            total=df_well_images['z_stack_id'].unique().shape[0],
-        ):
-            df_z_images = df_well_images[df_well_images['z_stack_id'] == z]
-            df_z_images = df_z_images.sort_values(by=['channel_id'], ascending=True)
-
-            imgs = np.asarray(
-                [
-                    self.load_image(os.path.join(dir_image, file))
-                    for dir_image, file in zip(
-                        df_z_images['dir_images'], df_z_images['file']
-                    )
-                ]
-            )
-            imgs = np.moveaxis(imgs, 0, -1)
-            patches_tmp = view_as_windows(
-                imgs,
-                (self.patch_size[0], self.patch_size[0], len(self.channels)),
-                self.stride,
-            )
-            # drop 3rd axis
-            patches_tmp = np.squeeze(patches_tmp, axis=2)
-            # get x and y indices of first and second axis
-            indices = np.indices(patches_tmp.shape[:2])
-            # flatten first two axis
-            patches_tmp = patches_tmp.reshape(-1, *self.patch_size, len(self.channels))
-            patches.append(patches_tmp)
-            x = indices[0].flatten()
-            y = indices[1].flatten()
-            df.append(
-                pd.DataFrame(
-                    {'z_stack_id': z, 'well_id': well_id, 'x': x, 'y': y},
-                    index=np.arange(0, patches_tmp.shape[0]),
-                )
-            )
-
-        patches = np.concatenate(patches)
-        df = pd.concat(df)
-        patches = patches.astype(np.float32)
-        if quantiles is not None:
-            for i in range(patches.shape[-1]):
-                patches[..., i] = np.clip(patches[..., i] / quantiles[i], 0, 1)
-            patches = patches.astype(np.float32)
-        return patches, df
-
-
-class PatchGenerator(Sequence):
-    """
-    PatchGenerator
+    This generator loads patches from disk and applies optional data
+    augmentation and normalization for training deep learning models.
     """
 
     def __init__(
@@ -848,14 +447,34 @@ class PatchGenerator(Sequence):
         **kwargs,
     ):
         """
-        Patch generator
-        :param list_ids:
-        :param dir_dataset:
-        :param batch_size:
-        :param dim:
-        :param n_channels:
-        :param shuffle:
-        :param kwargs:
+        Initialize PatchGenerator.
+
+        Parameters
+        ----------
+        list_ids : list
+            List of file paths for patches to load
+        batch_size : int, default 32
+            Number of patches per batch
+        dim : tuple, default (128, 128)
+            Spatial dimensions of patches
+        n_channels : int, default 4
+            Number of channels in patches
+        shuffle : bool, default True
+            Whether to shuffle patch order each epoch
+        scale : bool, default False
+            Whether to apply intensity scaling
+        flip : bool, default False
+            Whether to apply random flipping augmentation
+        quantiles_low : array-like, optional
+            Low quantiles for intensity normalization
+        quantiles_high : array-like, optional
+            High quantiles for intensity normalization
+        conditions : array-like, optional
+            Condition labels for conditional generation
+        return_conditions : bool, default False
+            Whether to return conditions along with patches
+        **kwargs
+            Additional arguments passed to parent Sequence class
         """
         super().__init__(**kwargs)
         self.indexes = None
@@ -874,16 +493,28 @@ class PatchGenerator(Sequence):
 
     def __len__(self):
         """
-        Get length
-        :return:
+        Get number of batches per epoch.
+
+        Returns
+        -------
+        int
+            Number of batches that fit in the dataset
         """
         return int(np.floor(len(self.list_ids) / self.batch_size))
 
     def __getitem__(self, index):
         """
-        Get item
-        :param index:
-        :return:
+        Generate one batch of data.
+
+        Parameters
+        ----------
+        index : int
+            Batch index
+
+        Returns
+        -------
+        ndarray or tuple
+            Batch of patches, optionally with conditions
         """
         indexes = self.indexes[index * self.batch_size : (index + 1) * self.batch_size]
         list_ids_temp = [self.list_ids[k] for k in indexes]
@@ -916,8 +547,9 @@ class PatchGenerator(Sequence):
 
     def on_epoch_end(self):
         """
-        On epoch end
-        :return:
+        Update indexes after each epoch.
+
+        Shuffles the order of patches if shuffle is enabled.
         """
         self.indexes = np.arange(len(self.list_ids))
         if self.shuffle:
@@ -925,9 +557,17 @@ class PatchGenerator(Sequence):
 
     def __data_generation(self, list_ids_temp):
         """
-        Data generation
-        :param list_ids_temp:
-        :return:
+        Generate batch data by loading patches from disk.
+
+        Parameters
+        ----------
+        list_ids_temp : list
+            List of file paths for the current batch
+
+        Returns
+        -------
+        ndarray
+            Batch of loaded image patches
         """
         # Initialization
         X = np.empty((self.batch_size, *self.dim, self.n_channels))
@@ -941,10 +581,19 @@ class PatchGenerator(Sequence):
 
 def extract_conditions(files, dir_datasets):
     """
-    Extract conditions
-    :param files:
-    :param dir_datasets:
-    :return:
+    Extract conditions from file paths.
+
+    Parameters
+    ----------
+    files : list
+        List of file paths
+    dir_datasets : str
+        Directory containing datasets
+
+    Returns
+    -------
+    tuple
+        Dataset conditions and z-stack conditions
     """
     conditions_dataset = []
     conditions_z = []
@@ -963,6 +612,7 @@ def extract_conditions(files, dir_datasets):
 
 
 def setup_generators(
+    datasets,
     dir_datasets,
     conditional=False,
     batch_size=64,
@@ -972,30 +622,46 @@ def setup_generators(
     scale=True,
     n_workers=1,
 ):
+    # TODO: update function signature -> new sdata based structure, no need for dataset merging.
+    # Include into phenocoder main class.
     """
-    Setup generators
-    :param dir_datasets:
-    :param conditional:
-    :param batch_size:
-    :param dim:
-    :param n_channels:
-    :param shuffle:
-    :param scale:
-    :param n_workers:
-    :return:
+    Setup generators for training and validation.
+
+    Parameters
+    ----------
+    dir_datasets : str
+        Directory containing datasets
+    conditional : bool, default False
+        Whether to return conditions with data
+    batch_size : int, default 64
+        Batch size for generators
+    dim : tuple, default (128, 128)
+        Dimensions of patches
+    n_channels : int, default 4
+        Number of channels
+    shuffle : bool, default True
+        Whether to shuffle data
+    scale : bool, default True
+        Whether to scale data using quantiles
+    n_workers : int, default 1
+        Number of workers for data generation
+
+    Returns
+    -------
+    tuple
+        Training generator, validation generator, dataframe, and encoder
     """
-    datasets = os.listdir(dir_datasets)
-    datasets = [
-        d
-        for d in datasets
-        if os.path.isfile(os.path.join(dir_datasets, d, 'stats.csv'))
-    ]
-    dataset_merger = DatasetMerger(datasets=datasets, dir_datasets=dir_datasets)
-    dataset_merger.merge_datasets()
-    files = dataset_merger.get_files()
-    quantiles_low, quantiles_high = dataset_merger.get_scaling_stats()
-    conditions_dataset, conditions_z = extract_conditions(files, dir_datasets)
-    df = pd.DataFrame({'file': files, 'dataset': conditions_dataset, 'z': conditions_z})
+    dataset_loader = DatasetLoader(datasets=datasets, dir_datasets=dir_datasets)
+    dataset_loader.merge_datasets()
+    files = dataset_loader.get_files()
+    quantiles_low, quantiles_high = dataset_loader.get_scaling_stats()
+    if conditional:
+        conditions_dataset, conditions_z = extract_conditions(files, dir_datasets)
+        df = pd.DataFrame(
+            {'file': files, 'dataset': conditions_dataset, 'z': conditions_z}
+        )
+    else:
+        df = pd.DataFrame({'file': files})
     # randomize
     df = df.sample(frac=1, random_state=42, replace=False)
     # get well dataset combinations and split into train and val
@@ -1007,6 +673,7 @@ def setup_generators(
     df_well['split'] = [
         'train' if i < n_train else 'val' for i in range(df_well.shape[0])
     ]
+    # TODO: add stratify by sample key!
     # merge df with df_well_train
     df = pd.merge(
         df,
@@ -1028,8 +695,8 @@ def setup_generators(
     # convert conditions to numpy array
     cond_train = cond[df['split'] == 'train']
     cond_val = cond[df['split'] == 'val']
-
-    generator_train = PatchGenerator(
+    # TODO: fix that the SequenceGenerator just works for the CondVAE...
+    generator_train = SequenceGenerator(
         files_train.values,
         conditions=cond_train,
         batch_size=batch_size,
@@ -1043,7 +710,7 @@ def setup_generators(
         workers=n_workers,
     )
 
-    generator_val = PatchGenerator(
+    generator_val = SequenceGenerator(
         files_val.values,
         conditions=cond_val,
         batch_size=batch_size,

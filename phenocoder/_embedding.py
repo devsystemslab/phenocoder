@@ -5,6 +5,10 @@ import anndata as ad
 import pandas as pd
 import numpy as np
 
+# TODO: Add spatialdata import
+# TODO: Refactor to work with sdata instead of pandas DataFrames and AnnData
+# TODO: Store embeddings in sdata.tables instead of creating standalone AnnData objects
+
 
 def organoid_embedding(
     df: pd.DataFrame,
@@ -24,6 +28,8 @@ def organoid_embedding(
     :param confounder:
     :return:
     """
+    # TODO: Refactor to accept sdata parameter instead of pandas DataFrame
+    # TODO: Direct DataFrame to AnnData conversion should be replaced with sdata table access
     df = df.loc[:, ~df.columns.duplicated()]
     adata = ad.AnnData(df.drop(columns=['well_id', 'plate_id']))
     adata.obs.index = adata.obs.index.astype(str)
@@ -77,7 +83,9 @@ def run_organoid_embedding(
     :param res:
     :return:
     """
-
+    # TODO: Refactor to accept sdata instead of spatial_dict (dict of DataFrames)
+    # TODO: Return sdata-integrated result instead of MuData
+    # TODO: pd.concat calls should be replaced with sdata table operations
     adata_dict = {}
     for mod in spatial_dict.keys():
         print(f'Generating organoid embedding for {mod}...')

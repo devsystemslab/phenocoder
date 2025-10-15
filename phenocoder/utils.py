@@ -4,6 +4,111 @@ import os
 from pathlib import Path
 import anndata as ad
 from tqdm import tqdm
+import umap
+import matplotlib.pyplot as plt
+import io
+import tensorflow as tf
+from skimage.util import montage
+
+
+def plot_latent_space(
+    model, generator, oh_enc, sample_frac=1, show=True, return_fig=False
+):
+    reducer = umap.UMAP()
+    n_samples = int(sample_frac * len(generator))
+    idx = np.random.choice(range(len(generator)), n_samples, replace=False)
+    if generator.return_conditions:
+        data, conditions = zip(*[generator[i] for i in idx])
+        data = np.concatenate(data, axis=0)
+        conditions = np.concatenate(conditions, axis=0)
+        z_mean, z_log_var, z = model.encoder.predict((data, conditions))
+    else:
+        generator.return_conditions = True
+        data, conditions = zip(*[generator[i] for i in idx])
+        data = np.concatenate(data, axis=0)
+        conditions = np.concatenate(conditions, axis=0)
+        z_mean, z_log_var, z = model.encoder.predict(data)
+
+    df_labels = pd.DataFrame(
+        oh_enc.inverse_transform(conditions), columns=oh_enc.feature_names_in_.tolist()
+    )
+    df_labels['z'] = pd.factorize(df_labels['z'])[0]
+    z_umap = reducer.fit_transform(z)
+    fig, ax = plt.subplots(ncols=2, figsize=(12, 6))
+    for i, dataset in enumerate(df_labels['dataset'].unique()):
+        ax[0].scatter(
+            z_umap[df_labels['dataset'] == dataset, 0],
+            z_umap[df_labels['dataset'] == dataset, 1],
+            label=dataset,
+            s=0.5,
+        )
+    ax[0].legend()
+    ax[0].set_title('dataset')
+    scatter_z = ax[1].scatter(z_umap[:, 0], z_umap[:, 1], c=df_labels['z'], s=0.5)
+    fig.colorbar(scatter_z, ax=ax[1])
+    ax[1].set_title('z-stack position')
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+    if return_fig:
+        return fig
+
+
+def plot_reconstructions(
+    model, generator, n_preview=200, batch_size=64, show=True, return_fig=False
+):
+    if generator.return_conditions:
+        data, conditions = zip(
+            *[generator[i] for i in range((n_preview // batch_size) + 1)]
+        )
+        data = np.concatenate(data, axis=0)
+        conditions = np.concatenate(conditions, axis=0)
+        z_mean, z_log_var, z = model.encoder.predict(
+            (data, conditions), batch_size=batch_size
+        )
+        pred = model.decoder.predict([z, conditions], batch_size=batch_size)
+    else:
+        data = np.concatenate(
+            [generator[i] for i in range((n_preview // batch_size) + 1)], axis=0
+        )
+        z_mean, z_log_var, z = model.encoder.predict(data, batch_size=batch_size)
+        pred = model.decoder.predict(z, batch_size=batch_size)
+    # sample n_preview images
+    fig, axs = plt.subplots(4, 1, figsize=(10, 20))
+    idx = np.random.choice(
+        range(data.shape[0]), n_preview, replace=n_preview > data.shape[0]
+    )
+    for i, ax in enumerate(axs.reshape(-1)):
+        imgs_plot = np.concatenate([data[idx, :, :, 0], pred[idx, :, :, 0]], axis=2)
+        # scale each patch to 0-1
+        imgs_plot = np.asarray(
+            [np.interp(img, (0, np.percentile(img, 99)), (0, 1)) for img in imgs_plot]
+        )
+        ax.imshow(montage(imgs_plot))
+        ax.set_title(f'Channel {i}')
+    plt.tight_layout()
+    if show:
+        plt.show()
+    if return_fig:
+        return fig
+
+
+def plot_to_image(figure):
+    """Converts the matplotlib plot specified by 'figure' to a PNG image and
+    returns it. The supplied figure is closed and inaccessible after this call."""
+    # Save the plot to a PNG in memory.
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    # Closing the figure prevents it from being displayed directly inside
+    # the notebook.
+    plt.close(figure)
+    buf.seek(0)
+    # Convert PNG buffer to TF image
+    image = tf.image.decode_png(buf.getvalue(), channels=4)
+    # Add the batch dimension
+    image = tf.expand_dims(image, 0)
+    return image
 
 
 def scale_image(
@@ -35,6 +140,8 @@ def load_features(
     :param input_type:
     :return:
     """
+    # TODO: Refactor to accept sdata and load from sdata.tables instead of hard-coded directory structure
+    # TODO: This function is dataset-specific with hard-coded paths (laminator, nuclei subdirs)
     dir_features = Path(dir_plate, cycle, 'features')
     dir_laminator = Path(dir_features, 'laminator', input_type, 'neighbors')
     dir_nuclei = Path(dir_features, 'nuclei', input_type)
@@ -116,6 +223,7 @@ def average_matched_nuclei(  # TODO: remove suffix prefix stuff
     :param naming:
     :return:
     """
+    # TODO: Refactor to work with sdata.tables instead of manipulating adata.obs directly
     if naming == 'suffix':
         for feature in features:
             adata.obs[f'{feature}'] = adata.obs[
@@ -147,6 +255,8 @@ def load_plate(
     :param z_step:
     :return:
     """
+    # TODO: Refactor to accept sdata and load from sdata.tables instead of file system
+    # TODO: This is completely file-based with hard-coded directory structures
     if registered:
         dir_registration = Path(dir_screen, plate, 'features_registration', input_type)
         files = os.listdir(dir_registration)

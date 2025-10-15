@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 
 
 # TODO: write spatial_graph stat class instead of having all function individually. keep funcionality to use the module outside of Phenocoder class
+
+
 def get_chull(
     adata: ad.AnnData,
     sample: str,
@@ -21,15 +23,31 @@ def get_chull(
     pixel_size=0.322,
 ) -> float:
     """
-    Get convex hull volume
-    :param sample:
-    :param sample_key:
-    :param adata:
-    :param radius:
-    :param degree_threshold:
-    :param filter_obs:
-    :param convert_units:
-    :return:
+    Calculate convex hull volume, area, and density for spatial data.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object containing spatial coordinates.
+    sample : str
+        Sample identifier.
+    sample_key : str
+        Key in adata.obs identifying the sample column.
+    radius : int, default 100
+        Radius for neighbor graph construction.
+    degree_threshold : int, default 5
+        Minimum degree threshold for filtering points.
+    filter_obs : bool, default False
+        Whether to filter observations by sample.
+    convert_units : bool, default True
+        Whether to convert units using pixel_size.
+    pixel_size : float, default 0.322
+        Pixel size for unit conversion.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing convex hull volume, area, and density metrics.
     """
     if filter_obs:
         adata = adata[adata.obs[sample_key] == sample]
@@ -91,17 +109,32 @@ def get_chulls_connected_components(
 ) -> pd.DataFrame:
     """
     Calculate convex hull for connected components in subset of spatial graph.
-    :param adata:
-    :param well:
-    :param plate:
-    :param clusters:
-    :param filter_obs:
-    :param radius:
-    :param min_nds:
-    :param convert_units:
-    :param pixel_size:
-    :param plot:
-    :return:
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object containing spatial coordinates.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+    clusters : list
+        List of cluster identifiers to include.
+    radius : int, default 100
+        Radius for neighbor graph construction.
+    min_nds : int, default 10
+        Minimum number of nodes for connected components.
+    convert_units : bool, default True
+        Whether to convert units using pixel_size.
+    pixel_size : float, default 0.322
+        Pixel size for unit conversion.
+    plot : bool, default False
+        Whether to plot the graph.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing convex hull metrics for each connected component.
     """
     adata = adata[adata.obs['plate_id'] == plate]
     adata = adata[adata.obs['well_id'] == well]
@@ -211,11 +244,21 @@ def get_chulls_connected_components(
 
 def get_centrality(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
     """
-    Get centrality
-    :param adata:
-    :param well:
-    :param plate:
-    :return:
+    Calculate centrality scores for spatial graph.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing centrality scores for each cluster pair.
     """
     # centrality scores
     sq.gr.centrality_scores(adata, cluster_key='leiden', connectivity_key='spatial')
@@ -236,11 +279,21 @@ def get_centrality(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
 
 def get_interactions(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
     """
-    Get interactions
-    :param adata:
-    :param well:
-    :param plate:
-    :return:
+    Calculate interaction matrices between clusters.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing normalized and raw interaction counts.
     """
 
     # interaction matrix
@@ -278,11 +331,21 @@ def get_interactions(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
 
 def get_connectivity(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
     """
-    Get connectivity
-    :param adata:
-    :param well:
-    :param plate:
-    :return:
+    Calculate connectivity statistics for spatial graph.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing mean and standard deviation of connectivity degrees.
     """
     # get mean connectivity
     degrees = adata.obsp['spatial_connectivities'].sum(axis=0)
@@ -330,11 +393,21 @@ def get_neighborhood_enrichment(
     adata: ad.AnnData, well: str, plate: str
 ) -> pd.DataFrame:
     """
-    Get neighborhood enrichment
-    :param adata:
-    :param well:
-    :param plate:
-    :return:
+    Calculate neighborhood enrichment z-scores between clusters.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing neighborhood enrichment z-scores for cluster pairs.
     """
     sq.gr.nhood_enrichment(
         adata, cluster_key='leiden', connectivity_key='spatial', show_progress_bar=False
@@ -359,11 +432,21 @@ def get_neighborhood_enrichment(
 
 def get_moran(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
     """
-    Get moran I
-    :param adata:
-    :param well:
-    :param plate:
-    :return:
+    Calculate Moran's I spatial autocorrelation for features.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing Moran's I values for each feature.
     """
     if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
         df_moran = pd.DataFrame(0, index=[well + '_' + plate], columns=adata.var_names)
@@ -385,6 +468,23 @@ def get_moran(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
 
 
 def get_moran_cluster(adata: ad.AnnData, well: str, plate: str) -> pd.DataFrame:
+    """
+    Calculate Moran's I spatial autocorrelation for cluster assignments.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data object with spatial connectivity and leiden clusters.
+    well : str
+        Well identifier.
+    plate : str
+        Plate identifier.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing Moran's I values for each cluster.
+    """
     # one hot encode adata.obs['leiden']
     df = pd.get_dummies(adata.obs['leiden']).astype(int)
     adata_cl = ad.AnnData(df, obs=adata.obs, obsm=adata.obsm, obsp=adata.obsp)
@@ -418,15 +518,29 @@ def get_spatial_stats(
     cluster_key: str = None,
 ) -> pd.DataFrame:
     """
-    Get spatial stats
-    :param well: str well id
-    :param plate: str plate id
-    :param adata: ad.AnnData
-    :param radii: tuple[int] radii
-    :param radius_chull: int radius chull
-    :param layer: str layer
-    :param cluster_key: str cluster key
-    :return:
+    Calculate comprehensive spatial statistics for a sample.
+
+    Parameters
+    ----------
+    sample : str
+        Sample identifier.
+    sample_key : str
+        Key in adata.obs identifying the sample column.
+    adata : ad.AnnData
+        Annotated data object containing spatial coordinates.
+    radii : tuple[int], default (25, 50, 100, 150)
+        Radii for spatial neighbor calculations.
+    radius_chull : int, default 100
+        Radius for convex hull calculations.
+    layer : str, optional
+        Layer to use for expression data.
+    cluster_key : str, optional
+        Key for cluster assignments.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing all spatial statistics for the sample.
     """
     adata = adata[adata.obs[sample_key] == sample]
     adata = adata.copy()
@@ -475,11 +589,21 @@ def run_spatial_feature_processing(
     mdata, radii: tuple[int] = (25, 50, 100, 150), radius_chull: int = 100
 ):
     """
-    Run spatial feature processing
-    :param mdata:
-    :param radii:
-    :param radius_chull:
-    :return:
+    Run spatial feature processing across all modalities in MuData object.
+
+    Parameters
+    ----------
+    mdata : MuData
+        Multi-modal data object containing spatial coordinates and clusters.
+    radii : tuple[int], default (25, 50, 100, 150)
+        Radii for spatial neighbor calculations.
+    radius_chull : int, default 100
+        Radius for convex hull calculations.
+
+    Returns
+    -------
+    dict
+        Dictionary with modality names as keys and spatial feature DataFrames as values.
     """
     spatial_dict = {}
     df_qc = []
