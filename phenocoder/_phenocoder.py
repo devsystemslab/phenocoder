@@ -9,11 +9,7 @@ import spatialdata as sd
 import tensorflow as tf
 import yaml
 
-from phenocoder.generator import (
-    DatasetGenerator,
-    NucleiPatchGenerator,
-    setup_generators,
-)
+from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.utils import plot_latent_space, plot_reconstructions, plot_to_image
 
@@ -140,7 +136,7 @@ class Phenocoder:
             self.datasets = [dataset]
         else:
             self.datasets = self.datasets.append(dataset)
-        dataset_generator = DatasetGenerator(
+        dataset_generator = PatchGenerator(
             dataset=dataset,
             sdata=self.sdata,
             dir_output=self.data_dir,
@@ -456,7 +452,7 @@ class Phenocoder:
         """
         results = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
-        nuclei_patch_generator = NucleiPatchGenerator()
+        nuclei_patch_generator = PatchGenerator()
         for sample in samples:
             patches, df = nuclei_patch_generator.get_patches(
                 sample,

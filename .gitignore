@@ -9,4 +9,4 @@ build/
 phenocoder.egg-info/
 sdata/
 *.npy
-*.csv
+tmp/

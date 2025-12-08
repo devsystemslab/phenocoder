@@ -146,8 +146,9 @@ class PatchGenerator:
         image = np.asarray(self.sdata.images[image_key])
         return image
 
+    # TODO: update method, to directly fetch from sdata.images[{image_key}_{sample_key}]
     def extract_patch(
-        self, img, id, scale=False, quantiles_high=None, quantiles_low=None
+        self, img, id, scale=False, percentiles_high=None, percentiles_low=None
     ):
         """
         Extract a patch from an image centered on specified coordinates.
@@ -177,13 +178,13 @@ class PatchGenerator:
         img = img[:, y_min:y_max, x_min:x_max]
         assert img.shape[-2:] == self.patch_size
         if scale:
-            if quantiles_high is None or quantiles_low is None:
-                raise ValueError('Quantiles need to be provided for scaling')
+            if percentiles_high is None or percentiles_low is None:
+                raise ValueError('Percentiles need to be provided for scaling')
             img = img.astype(np.float32)
             for i in range(img.shape[-1]):
                 img[..., i] = np.clip(
-                    (img[..., i] - quantiles_low[i])
-                    / (quantiles_high[i] - quantiles_low[i]),
+                    (img[..., i] - percentiles_low[i])
+                    / (percentiles_high[i] - percentiles_low[i]),
                     0,
                     1,
                 )
@@ -191,7 +192,8 @@ class PatchGenerator:
 
         return img
 
-    def __get_image_stats__(self, imgs, id, id_name):
+    # TODO: update to interact with sdata.images slot
+    def __get_image_stats__(self, imgs, id, id_name, percentile=1):
         """
         Calculate comprehensive statistics for image data.
 
@@ -218,8 +220,8 @@ class PatchGenerator:
         mad = np.median(np.abs(imgs - np.median(imgs)), axis=(-2, -1))
         max = np.max(imgs, axis=(-2, -1))
         min = np.min(imgs, axis=(-2, -1))
-        quantile_low = np.percentile(imgs, 1, axis=(-2, -1))
-        quantile_high = np.percentile(imgs, 99, axis=(-2, -1))
+        percentile_low = np.percentile(imgs, percentile, axis=(-2, -1))
+        percentile_high = np.percentile(imgs, 100 - percentile, axis=(-2, -1))
 
         df = pd.concat(
             [
@@ -230,8 +232,8 @@ class PatchGenerator:
                         'z': np.arange(imgs.shape[1]),
                         'mean': mean[i],
                         'std': std[i],
-                        'quantile_high': quantile_high[i],
-                        'quantile_low': quantile_low[i],
+                        'percentile_high': percentile_high[i],
+                        'percentile_low': percentile_low[i],
                         'median': median[i],
                         'mad': mad[i],
                         'max': max[i],
@@ -357,6 +359,162 @@ class PatchGenerator:
             )
 
 
+class SequenceGenerator(Sequence):
+    """
+    Keras Sequence generator for loading image patches during training.
+
+    This generator loads patches from disk and applies optional data
+    augmentation and normalization for training deep learning models.
+    """
+
+    def __init__(
+        self,
+        list_ids: list,
+        batch_size=32,
+        dim=(128, 128),
+        n_channels=4,
+        shuffle=True,
+        scale=False,
+        flip=False,
+        percentiles_low=None,
+        percentiles_high=None,
+        conditions=None,
+        return_conditions=False,
+        **kwargs,
+    ):
+        """
+        Initialize PatchGenerator.
+
+        Parameters
+        ----------
+        list_ids : list
+            List of file paths for patches to load
+        batch_size : int, default 32
+            Number of patches per batch
+        dim : tuple, default (128, 128)
+            Spatial dimensions of patches
+        n_channels : int, default 4
+            Number of channels in patches
+        shuffle : bool, default True
+            Whether to shuffle patch order each epoch
+        scale : bool, default False
+            Whether to apply intensity scaling
+        flip : bool, default False
+            Whether to apply random flipping augmentation
+        percentiles_low : array-like, optional
+            Low quantiles for intensity normalization
+        percentiles_high : array-like, optional
+            High quantiles for intensity normalization
+        conditions : array-like, optional
+            Condition labels for conditional generation
+        return_conditions : bool, default False
+            Whether to return conditions along with patches
+        **kwargs
+            Additional arguments passed to parent Sequence class
+        """
+        super().__init__(**kwargs)
+        self.indexes = None
+        self.dim = dim
+        self.batch_size = batch_size
+        self.list_ids = list_ids
+        self.n_channels = n_channels
+        self.shuffle = shuffle
+        self.flip = flip
+        self.scale = scale
+        self.percentiles_low = percentiles_low
+        self.percentiles_high = percentiles_high
+        self.conditions = conditions
+        self.return_conditions = return_conditions
+        self.on_epoch_end()
+
+    def __len__(self):
+        """
+        Get number of batches per epoch.
+
+        Returns
+        -------
+        int
+            Number of batches that fit in the dataset
+        """
+        return int(np.floor(len(self.list_ids) / self.batch_size))
+
+    def __getitem__(self, index):
+        """
+        Generate one batch of data.
+
+        Parameters
+        ----------
+        index : int
+            Batch index
+
+        Returns
+        -------
+        ndarray or tuple
+            Batch of patches, optionally with conditions
+        """
+        indexes = self.indexes[index * self.batch_size : (index + 1) * self.batch_size]
+        list_ids_temp = [self.list_ids[k] for k in indexes]
+        X = self.__data_generation(list_ids_temp)
+
+        if self.scale:
+            for i in range(X.shape[-1]):
+                X[..., i] = np.clip(
+                    (X[..., i] - self.percentiles_low[i])
+                    / (self.percentiles_high[i] - self.percentiles_low[i]),
+                    0,
+                    1,
+                )
+            X = X.astype(np.float32)
+
+        if self.flip:
+            for i in range(X.shape[0]):
+                # add random horizontal flip
+                if np.random.rand() < 0.5:
+                    X[i,] = np.fliplr(X[i,])
+                # add random vertical flip
+                if np.random.rand() < 0.5:
+                    X[i,] = np.flipud(X[i,])
+
+        if self.return_conditions and self.conditions is not None:
+            cond = self.conditions[indexes]
+            return X, cond
+        else:
+            return X
+
+    def on_epoch_end(self):
+        """
+        Update indexes after each epoch.
+
+        Shuffles the order of patches if shuffle is enabled.
+        """
+        self.indexes = np.arange(len(self.list_ids))
+        if self.shuffle:
+            np.random.shuffle(self.indexes)
+
+    def __data_generation(self, list_ids_temp):
+        """
+        Generate batch data by loading patches from disk.
+
+        Parameters
+        ----------
+        list_ids_temp : list
+            List of file paths for the current batch
+
+        Returns
+        -------
+        ndarray
+            Batch of loaded image patches
+        """
+        # Initialization
+        X = np.empty((self.batch_size, *self.dim, self.n_channels))
+        # Generate data
+        for i, idx in enumerate(list_ids_temp):
+            # Store sample
+            X[i,] = np.load(idx)
+
+        return X
+
+
 class DatasetLoader:
     """
     Utility class for merging multiple datasets and their statistics.
@@ -415,313 +573,155 @@ class DatasetLoader:
         Returns
         -------
         tuple
-            Tuple of (quantiles_low, quantiles_high) for each channel,
+            Tuple of (percentiles_low, percentiles_high) for each channel,
             representing the global min/max quantiles for normalization
         """
-        quantiles_low = self.stats.groupby('channel')['quantile_low'].min()
-        quantiles_high = self.stats.groupby('channel')['quantile_high'].max()
-        return quantiles_low, quantiles_high
+        percentiles_low = self.stats.groupby('channel')['quantile_low'].min()
+        percentiles_high = self.stats.groupby('channel')['quantile_high'].max()
+        return percentiles_low, percentiles_high
 
+    def extract_conditions(self, files, dir_datasets):
+        """
+        Extract conditions from file paths.
 
-class SequenceGenerator(Sequence):
-    """
-    Keras Sequence generator for loading image patches during training.
+        Parameters
+        ----------
+        files : list
+            List of file paths
+        dir_datasets : str
+            Directory containing datasets
 
-    This generator loads patches from disk and applies optional data
-    augmentation and normalization for training deep learning models.
-    """
+        Returns
+        -------
+        tuple
+            Dataset conditions and z-stack conditions
+        """
+        conditions_dataset = []
+        conditions_z = []
+        for f in files:
+            # remove dir_datasets from path
+            f = f.replace(f'{dir_datasets}/', '')
+            # extract digit between _ and _
+            f = f.split('/')
+            # extract condition
+            condition_dataset = f[0]
+            condition_z = f[-1].split('_')[1]
+            conditions_dataset.append(condition_dataset)
+            conditions_z.append(int(condition_z))
 
-    def __init__(
+        return conditions_dataset, conditions_z
+
+    def setup_generators(
         self,
-        list_ids: list,
-        batch_size=32,
+        datasets,
+        dir_datasets,
+        conditional=False,
+        batch_size=64,
         dim=(128, 128),
         n_channels=4,
         shuffle=True,
-        scale=False,
-        flip=False,
-        quantiles_low=None,
-        quantiles_high=None,
-        conditions=None,
-        return_conditions=False,
-        **kwargs,
+        scale=True,
+        n_workers=1,
     ):
         """
-        Initialize PatchGenerator.
+        Setup generators for training and validation.
 
         Parameters
         ----------
-        list_ids : list
-            List of file paths for patches to load
-        batch_size : int, default 32
-            Number of patches per batch
+        dir_datasets : str
+            Directory containing datasets
+        conditional : bool, default False
+            Whether to return conditions with data
+        batch_size : int, default 64
+            Batch size for generators
         dim : tuple, default (128, 128)
-            Spatial dimensions of patches
+            Dimensions of patches
         n_channels : int, default 4
-            Number of channels in patches
+            Number of channels
         shuffle : bool, default True
-            Whether to shuffle patch order each epoch
-        scale : bool, default False
-            Whether to apply intensity scaling
-        flip : bool, default False
-            Whether to apply random flipping augmentation
-        quantiles_low : array-like, optional
-            Low quantiles for intensity normalization
-        quantiles_high : array-like, optional
-            High quantiles for intensity normalization
-        conditions : array-like, optional
-            Condition labels for conditional generation
-        return_conditions : bool, default False
-            Whether to return conditions along with patches
-        **kwargs
-            Additional arguments passed to parent Sequence class
-        """
-        super().__init__(**kwargs)
-        self.indexes = None
-        self.dim = dim
-        self.batch_size = batch_size
-        self.list_ids = list_ids
-        self.n_channels = n_channels
-        self.shuffle = shuffle
-        self.flip = flip
-        self.scale = scale
-        self.quantiles_low = quantiles_low
-        self.quantiles_high = quantiles_high
-        self.conditions = conditions
-        self.return_conditions = return_conditions
-        self.on_epoch_end()
-
-    def __len__(self):
-        """
-        Get number of batches per epoch.
+            Whether to shuffle data
+        scale : bool, default True
+            Whether to scale data using quantiles
+        n_workers : int, default 1
+            Number of workers for data generation
 
         Returns
         -------
-        int
-            Number of batches that fit in the dataset
+        tuple
+            Training generator, validation generator, dataframe, and encoder
         """
-        return int(np.floor(len(self.list_ids) / self.batch_size))
-
-    def __getitem__(self, index):
-        """
-        Generate one batch of data.
-
-        Parameters
-        ----------
-        index : int
-            Batch index
-
-        Returns
-        -------
-        ndarray or tuple
-            Batch of patches, optionally with conditions
-        """
-        indexes = self.indexes[index * self.batch_size : (index + 1) * self.batch_size]
-        list_ids_temp = [self.list_ids[k] for k in indexes]
-        X = self.__data_generation(list_ids_temp)
-
-        if self.scale:
-            for i in range(X.shape[-1]):
-                X[..., i] = np.clip(
-                    (X[..., i] - self.quantiles_low[i])
-                    / (self.quantiles_high[i] - self.quantiles_low[i]),
-                    0,
-                    1,
-                )
-            X = X.astype(np.float32)
-
-        if self.flip:
-            for i in range(X.shape[0]):
-                # add random horizontal flip
-                if np.random.rand() < 0.5:
-                    X[i,] = np.fliplr(X[i,])
-                # add random vertical flip
-                if np.random.rand() < 0.5:
-                    X[i,] = np.flipud(X[i,])
-
-        if self.return_conditions and self.conditions is not None:
-            cond = self.conditions[indexes]
-            return X, cond
+        self.merge_datasets()
+        files = self.get_files()
+        percentiles_low, percentiles_high = self.get_scaling_stats()
+        if conditional:
+            conditions_dataset, conditions_z = self.extract_conditions(
+                files, dir_datasets
+            )
+            df = pd.DataFrame(
+                {'file': files, 'dataset': conditions_dataset, 'z': conditions_z}
+            )
         else:
-            return X
-
-    def on_epoch_end(self):
-        """
-        Update indexes after each epoch.
-
-        Shuffles the order of patches if shuffle is enabled.
-        """
-        self.indexes = np.arange(len(self.list_ids))
-        if self.shuffle:
-            np.random.shuffle(self.indexes)
-
-    def __data_generation(self, list_ids_temp):
-        """
-        Generate batch data by loading patches from disk.
-
-        Parameters
-        ----------
-        list_ids_temp : list
-            List of file paths for the current batch
-
-        Returns
-        -------
-        ndarray
-            Batch of loaded image patches
-        """
-        # Initialization
-        X = np.empty((self.batch_size, *self.dim, self.n_channels))
-        # Generate data
-        for i, idx in enumerate(list_ids_temp):
-            # Store sample
-            X[i,] = np.load(idx)
-
-        return X
-
-
-def extract_conditions(files, dir_datasets):
-    """
-    Extract conditions from file paths.
-
-    Parameters
-    ----------
-    files : list
-        List of file paths
-    dir_datasets : str
-        Directory containing datasets
-
-    Returns
-    -------
-    tuple
-        Dataset conditions and z-stack conditions
-    """
-    conditions_dataset = []
-    conditions_z = []
-    for f in files:
-        # remove dir_datasets from path
-        f = f.replace(f'{dir_datasets}/', '')
-        # extract digit between _ and _
-        f = f.split('/')
-        # extract condition
-        condition_dataset = f[0]
-        condition_z = f[-1].split('_')[1]
-        conditions_dataset.append(condition_dataset)
-        conditions_z.append(int(condition_z))
-
-    return conditions_dataset, conditions_z
-
-
-def setup_generators(
-    datasets,
-    dir_datasets,
-    conditional=False,
-    batch_size=64,
-    dim=(128, 128),
-    n_channels=4,
-    shuffle=True,
-    scale=True,
-    n_workers=1,
-):
-    # TODO: update function signature -> new sdata based structure, no need for dataset merging.
-    # Include into phenocoder main class.
-    """
-    Setup generators for training and validation.
-
-    Parameters
-    ----------
-    dir_datasets : str
-        Directory containing datasets
-    conditional : bool, default False
-        Whether to return conditions with data
-    batch_size : int, default 64
-        Batch size for generators
-    dim : tuple, default (128, 128)
-        Dimensions of patches
-    n_channels : int, default 4
-        Number of channels
-    shuffle : bool, default True
-        Whether to shuffle data
-    scale : bool, default True
-        Whether to scale data using quantiles
-    n_workers : int, default 1
-        Number of workers for data generation
-
-    Returns
-    -------
-    tuple
-        Training generator, validation generator, dataframe, and encoder
-    """
-    dataset_loader = DatasetLoader(datasets=datasets, dir_datasets=dir_datasets)
-    dataset_loader.merge_datasets()
-    files = dataset_loader.get_files()
-    quantiles_low, quantiles_high = dataset_loader.get_scaling_stats()
-    if conditional:
-        conditions_dataset, conditions_z = extract_conditions(files, dir_datasets)
-        df = pd.DataFrame(
-            {'file': files, 'dataset': conditions_dataset, 'z': conditions_z}
+            df = pd.DataFrame({'file': files})
+        # randomize
+        df = df.sample(frac=1, random_state=42, replace=False)
+        # get well dataset combinations and split into train and val
+        df['well_id'] = df['file'].apply(lambda x: x.split('/')[-1].split('_')[0])
+        df_well = df.groupby(['well_id', 'dataset']).count()
+        df_well = df_well.reset_index().sample(frac=1, random_state=42, replace=False)
+        # train val split
+        n_train = int(df_well.shape[0] * 0.8)
+        df_well['split'] = [
+            'train' if i < n_train else 'val' for i in range(df_well.shape[0])
+        ]
+        # TODO: add stratify by sample key!
+        # merge df with df_well_train
+        df = pd.merge(
+            df,
+            df_well[['well_id', 'dataset', 'split']],
+            on=['well_id', 'dataset'],
+            how='left',
         )
-    else:
-        df = pd.DataFrame({'file': files})
-    # randomize
-    df = df.sample(frac=1, random_state=42, replace=False)
-    # get well dataset combinations and split into train and val
-    df['well_id'] = df['file'].apply(lambda x: x.split('/')[-1].split('_')[0])
-    df_well = df.groupby(['well_id', 'dataset']).count()
-    df_well = df_well.reset_index().sample(frac=1, random_state=42, replace=False)
-    # train val split
-    n_train = int(df_well.shape[0] * 0.8)
-    df_well['split'] = [
-        'train' if i < n_train else 'val' for i in range(df_well.shape[0])
-    ]
-    # TODO: add stratify by sample key!
-    # merge df with df_well_train
-    df = pd.merge(
-        df,
-        df_well[['well_id', 'dataset', 'split']],
-        on=['well_id', 'dataset'],
-        how='left',
-    )
-    # drop remainders of split columns regarding batch_size grouped by split
-    df = (
-        df.groupby('split')
-        .apply(lambda x: x.iloc[: -(x.shape[0] % batch_size)])
-        .reset_index(drop=True)
-    )
-    files_train = df[df['split'] == 'train']['file']
-    files_val = df[df['split'] == 'val']['file']
-    # one hot encode conditions with sklearn
-    enc = OneHotEncoder()
-    cond = enc.fit_transform(df[['dataset', 'z']]).toarray()
-    # convert conditions to numpy array
-    cond_train = cond[df['split'] == 'train']
-    cond_val = cond[df['split'] == 'val']
-    # TODO: fix that the SequenceGenerator just works for the CondVAE...
-    generator_train = SequenceGenerator(
-        files_train.values,
-        conditions=cond_train,
-        batch_size=batch_size,
-        dim=dim,
-        n_channels=n_channels,
-        shuffle=shuffle,
-        scale=scale,
-        quantiles_low=quantiles_low.values,
-        quantiles_high=quantiles_high.values,
-        return_conditions=conditional,
-        workers=n_workers,
-    )
+        # drop remainders of split columns regarding batch_size grouped by split
+        df = (
+            df.groupby('split')
+            .apply(lambda x: x.iloc[: -(x.shape[0] % batch_size)])
+            .reset_index(drop=True)
+        )
+        files_train = df[df['split'] == 'train']['file']
+        files_val = df[df['split'] == 'val']['file']
+        # one hot encode conditions with sklearn
+        enc = OneHotEncoder()
+        cond = enc.fit_transform(df[['dataset', 'z']]).toarray()
+        # convert conditions to numpy array
+        cond_train = cond[df['split'] == 'train']
+        cond_val = cond[df['split'] == 'val']
+        # TODO: fix that the SequenceGenerator just works for the CondVAE...
+        generator_train = SequenceGenerator(
+            files_train.values,
+            conditions=cond_train,
+            batch_size=batch_size,
+            dim=dim,
+            n_channels=n_channels,
+            shuffle=shuffle,
+            scale=scale,
+            percentiles_low=percentiles_low.values,
+            percentiles_high=percentiles_high.values,
+            return_conditions=conditional,
+            workers=n_workers,
+        )
 
-    generator_val = SequenceGenerator(
-        files_val.values,
-        conditions=cond_val,
-        batch_size=batch_size,
-        dim=dim,
-        n_channels=n_channels,
-        shuffle=shuffle,
-        scale=scale,
-        quantiles_low=quantiles_low.values,
-        quantiles_high=quantiles_high.values,
-        return_conditions=conditional,
-        workers=n_workers,
-    )
+        generator_val = SequenceGenerator(
+            files_val.values,
+            conditions=cond_val,
+            batch_size=batch_size,
+            dim=dim,
+            n_channels=n_channels,
+            shuffle=shuffle,
+            scale=scale,
+            percentiles_low=percentiles_low.values,
+            percentiles_high=percentiles_high.values,
+            return_conditions=conditional,
+            workers=n_workers,
+        )
 
-    return generator_train, generator_val, df, enc
+        return generator_train, generator_val, df, enc

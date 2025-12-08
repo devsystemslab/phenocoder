@@ -74,37 +74,17 @@ def phenocoder_2d():
 
 
 def example_3d():
-    dir_images = 'tests/data/3d/imgs'
-    img_files = sorted(os.listdir(dir_images))
-
-    channels = [f'C0{i + 1}' for i in range(4)]
-    imgs = []
-    for channel in channels:
-        files_channel = [file for file in img_files if file.endswith(f'{channel}.png')]
-        imgs.append(
-            np.asarray([io.imread(Path(dir_images, file)) for file in files_channel])
-        )
-    imgs = np.asarray(imgs)
-
-    dir_labels = 'tests/data/3d/labels'
-    img_label_files = sorted(os.listdir(dir_labels))
-    imgs_label = np.asarray(
-        [io.imread(Path(dir_labels, file)) for file in img_label_files]
-    )
-
     dir_tables = 'tests/data/3d/tables'
     table_files = sorted(os.listdir(dir_tables))
     df = pd.concat([pd.read_csv(Path(dir_tables, file)) for file in table_files])
     z_step = 10
     pixel_size = 0.322
-    well = sorted(df['well'].unique())[0]
     df['centroid-0'] = df['centroid-0'] / 4
     df['centroid-1'] = df['centroid-1'] / 4
-    df = df.drop('well', axis=1)
     df['z_init'] = df['z_stack'] - 1
     df['z_stack'] = df['z_stack'] / pixel_size * z_step
-    df = df.groupby('label').mean()
-    df['well'] = well
+    df = df.groupby(['label', 'well']).mean()
+    df = df.reset_index()
 
     features_obs = [
         'area',
@@ -131,12 +111,50 @@ def example_3d():
     adata.obs['instance_id'] = adata.obs.index.astype(int)
     adata.obs['region'] = 'nuclei'
 
+    dir_images = 'tests/data/3d/imgs'
+    img_files = sorted(os.listdir(dir_images))
+    channels = [f'C0{i + 1}' for i in range(4)]
+    wells = adata.obs['well'].unique()
+
+    images_dict = {}
+    labels_dict = {}
+
+    # build per-well image and label entries
+    for well in wells:
+        # select image files belonging to this well
+        files_well = [f for f in img_files if f'_{well}_' in f]
+
+        imgs = []
+        for channel in channels:
+            files_channel = [
+                file for file in files_well if file.endswith(f'{channel}.png')
+            ]
+            imgs.append(
+                np.asarray(
+                    [io.imread(Path(dir_images, file)) for file in files_channel]
+                )
+            )
+        imgs = np.asarray(imgs)
+
+        # select label files for this well
+        dir_labels = 'tests/data/3d/labels'
+        img_label_files = sorted(os.listdir(dir_labels))
+        img_label_files_well = [f for f in img_label_files if f'_{well}_' in f]
+        imgs_label = np.asarray(
+            [io.imread(Path(dir_labels, file)) for file in img_label_files_well]
+        )
+
+        images_dict[f'IF_{well}'] = sd.models.Image3DModel.parse(
+            imgs, c_coords=channels
+        )
+        images_dict[f'IF_MIP_{well}'] = sd.models.Image2DModel.parse(
+            imgs.max(axis=1), c_coords=channels
+        )
+        labels_dict[f'nuclei_{well}'] = sd.models.Labels3DModel.parse(imgs_label)
+
     sdata = sd.SpatialData(
-        images={
-            'IF': sd.models.Image3DModel.parse(imgs, c_coords=channels),
-            'IF_MIP': sd.models.Image2DModel.parse(imgs.max(axis=1), c_coords=channels),
-        },
-        labels={'nuclei': sd.models.Labels3DModel.parse(imgs_label)},
+        images=images_dict,
+        labels=labels_dict,
         tables={
             'nuclei_features': sd.models.TableModel.parse(
                 adata,
@@ -152,8 +170,9 @@ def example_3d():
     pheno = phc.Phenocoder()
     pheno.add_sdata(sdata)
     pheno.table_key = 'nuclei_features'
-    pheno.sample_key = 'region'
+    pheno.sample_key = 'well'
     pheno.image_key = 'IF'
+    pheno.labels_key = 'nuclei'
     return pheno
 
 
