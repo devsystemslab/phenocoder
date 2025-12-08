@@ -1,5 +1,6 @@
-from conftest import example_2d
 from spatialdata import SpatialData
+
+from tests.conftest import example_2d
 
 
 def test_2d():

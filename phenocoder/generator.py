@@ -49,47 +49,27 @@ class PatchGenerator:
         """
         self.sdata = sdata
         self.image_key = image_key
-        self.channels = self.sdata.images[image_key].coords['c'].values.tolist()
         self.spatial_key = spatial_key
         self.table_key = table_key
         self.sample_key = sample_key
+        image_key_init = '_'.join(
+            [
+                self.image_key,
+                self.sdata.tables[self.table_key].obs[self.sample_key].unique()[0],
+            ]
+        )
+        self.channels = self.sdata.images[image_key_init].coords['c'].values.tolist()
+        self.image_size = self.sdata.images[image_key_init].shape[-2:]
+        self.patch_size = (128, 128)
         self.max_workers = max_workers
         self.dir_output = Path(dir_output)
         self.dir_dataset = Path(dir_output, dataset)
         self.df_images = None
-        self.df_stats_img = pd.DataFrame()
+        self.df_stats = pd.DataFrame()
         self.df_stats_patches = pd.DataFrame()
         self.df_stats_patches_sampled = None
-        self.image_size = self.sdata.images[self.image_key].shape[-2:]
-        self.patch_size = (128, 128)
         self.patches = None
         self.ids = None
-
-    def init_output(self):
-        """
-        Initialize output directories.
-
-        Creates the main output directory and dataset subdirectory if they
-        don't already exist.
-        """
-        self.dir_output.mkdir(exist_ok=True, parents=True)
-        self.dir_dataset.mkdir(exist_ok=True, parents=True)
-
-    def init_samples(self, sampling_frac=None):
-        """
-        Initialize sample IDs for processing.
-
-        Parameters
-        ----------
-        sampling_frac : float, optional
-            Fraction of samples to randomly select. If None, uses all samples.
-        """
-
-        self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
-        if sampling_frac is not None:
-            self.samples = np.random.choice(
-                self.samples, int(sampling_frac * len(self.samples)), replace=False
-            )
 
     def init_patches(self):
         """
@@ -129,26 +109,13 @@ class PatchGenerator:
 
         self.patches['id'] = np.arange(0, len(self.patches))
 
-    def load_image(self, image_key):
-        """
-        Load image from spatial data.
-
-        Parameters
-        ----------
-        image_key : str
-            Key for accessing the image in sdata.images
-
-        Returns
-        -------
-        ndarray
-            Loaded image array
-        """
-        image = np.asarray(self.sdata.images[image_key])
-        return image
-
-    # TODO: update method, to directly fetch from sdata.images[{image_key}_{sample_key}]
     def extract_patch(
-        self, img, id, scale=False, percentiles_high=None, percentiles_low=None
+        self,
+        img,
+        id,
+        scale=False,
+        percentiles_high=None,
+        percentiles_low=None,
     ):
         """
         Extract a patch from an image centered on specified coordinates.
@@ -168,6 +135,7 @@ class PatchGenerator:
         # extract patch centered on x and y
         x = int(self.patches[self.patches['id'] == id]['x'].iloc[0])
         y = int(self.patches[self.patches['id'] == id]['y'].iloc[0])
+
         if img.ndim == 4:
             z = int(self.patches[self.patches['id'] == id]['z'].iloc[0])
             img = img[:, z, ...]
@@ -192,7 +160,6 @@ class PatchGenerator:
 
         return img
 
-    # TODO: update to interact with sdata.images slot
     def __get_image_stats__(self, imgs, id, id_name, percentile=1):
         """
         Calculate comprehensive statistics for image data.
@@ -255,16 +222,17 @@ class PatchGenerator:
         sample_id : str or int
             Sample identifier for which to generate statistics
         """
+
         df_patch_positions = self.patches[self.patches[self.sample_key] == sample_id]
         if len(df_patch_positions) > 0:
             # load images
-            imgs = np.asarray(self.sdata.images[self.image_key])
+            imgs = np.asarray(self.sdata.images['_'.join([self.image_key, sample_id])])
             df_stat = self.__get_image_stats__(imgs, sample_id, 'sample_id')
             self.df_stats = pd.concat([self.df_stats, df_stat])
 
     def write_patches(self, sample_id):
         """
-        Write extracted patches to disk as numpy arrays.
+        Write all patches of a given samples to disk as numpy arrays.
 
         Parameters
         ----------
@@ -273,25 +241,20 @@ class PatchGenerator:
         """
 
         # get all files that need to be written
-        df_patches_sample = self.df_stats_patches_sampled[
-            self.df_stats_patches_sampled['id'] == sample_id
-        ]
-        # load images
-        imgs = np.asarray(self.sdata.images[self.image_key])
-        patches = [
-            self.extract_patch(imgs, batch_id)
-            for batch_id in df_patches_sample['batch_id']
-        ]
-        [
+        df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
+        img_key_sample = '_'.join([self.image_key, sample_id])
+        img = np.asarray(self.sdata.images[img_key_sample])
+        for id in tqdm(
+            df_patches_sample['id'], desc=f'Writing patches for {sample_id}'
+        ):
             np.save(
-                os.path.join(self.dir_dataset, f'{sample_id}_{batch_id}.npy'), patch
+                os.path.join(self.dir_dataset, f'{sample_id}_{id}.npy'),
+                self.extract_patch(img, id),
             )
-            for batch_id, patch in zip(df_patches_sample['batch_id'], patches)
-        ]
 
     def generate_dataset(
         self,
-        sampling_frac=None,
+        n_samples=None,
         n_patches=None,
     ):
         """
@@ -304,59 +267,25 @@ class PatchGenerator:
         n_patches : int, optional
             Number of patches to sample from all available patches
         """
-        self.init_output()
-        self.init_samples(sampling_frac=sampling_frac)
+        self.dir_output.mkdir(exist_ok=True, parents=True)
+        self.dir_dataset.mkdir(exist_ok=True, parents=True)
+        self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
+        if n_samples is not None:
+            self.samples = np.random.choice(self.samples, n_samples, replace=False)
         self.init_patches()
         [
             self.generate_image_stats(sample)
-            for sample in tqdm(self.samples, desc='Generating patch statistics')
+            for sample in tqdm(self.samples, desc='Generating image statistics')
         ]
-        self.sample_patches(n_patches=n_patches)
-        # set ids to sampled ids
-        self.samples = self.df_stats_patches_sampled['id'].unique()
+        self.df_stats.to_csv(Path(self.dir_dataset, 'stats.csv'), index=False)
+        if n_patches is not None:
+            self.patches = self.patches.sample(n_patches, replace=False)
+            self.samples = self.patches[self.sample_key].unique()
+
         [
             self.write_patches(id)
             for id in tqdm(self.samples, desc='Writing sampled patches')
         ]
-
-    def sample_patches(self, n_patches=None):
-        """
-        Sample a subset of patches for training.
-
-        Parameters
-        ----------
-        n_patches : int, optional
-            Number of patches to sample. If None or greater than available
-            patches, uses all patches.
-        """
-        if n_patches is None or n_patches > len(self.df_stats_patches):
-            self.df_stats_patches_sampled = self.df_stats_patches.copy()
-        else:
-            self.df_stats_patches_sampled = self.df_stats_patches.sample(
-                n_patches, replace=False
-            )
-
-    def save_stats(self):
-        """
-        Save computed statistics to CSV files.
-
-        Saves image statistics, patch statistics, and sampled patch
-        statistics to separate CSV files in the output directory.
-        """
-        self.df_stats.to_csv(Path(self.dir_dataset, 'stats.csv'), index=False)
-        self.df_stats_patches.to_csv(
-            Path(self.dir_dataset, 'stats_patches.csv'), index=False
-        )
-        print(
-            f'Patch statistics saved to: {Path(self.dir_dataset, "stats_patches.csv")}'
-        )
-        if self.df_stats_patches_sampled is not None:
-            self.df_stats_patches_sampled.to_csv(
-                Path(self.dir_dataset, 'stats_patches_sampled.csv'), index=False
-            )
-            print(
-                f'Sampled patch statistics saved to: {Path(self.dir_dataset, "stats_patches_sampled.csv")}'
-            )
 
 
 class SequenceGenerator(Sequence):

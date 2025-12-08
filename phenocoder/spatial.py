@@ -5,20 +5,33 @@ import pandas as pd
 import squidpy as sq
 from scipy.spatial import ConvexHull
 from sklearn.neighbors import radius_neighbors_graph
-from tqdm import tqdm
 
 
 class SpatialGraphAnalyzer:
-    def __init__(self, adata: ad.AnnData):
+    """
+    Class for analyzing spatial graphs.
+
+    """
+
+    def __init__(
+        self,
+        adata: ad.AnnData,
+        cluster_key: str,
+        spatial_key: str,
+        radii: tuple[int],
+        index: str,
+    ):
         self.adata = adata
-        self.radii: tuple[int] = None
+        self.cluster_key = cluster_key
+        self.spatial_key = spatial_key
+        self.radii = radii
+        self.index = index
 
     def get_chull(
         self,
-        index: str,
         radius: int = 100,
         degree_threshold: int = 5,
-    ) -> float:
+    ) -> pd.DataFrame:
         """
         Calculate convex hull volume, area, and density for spatial data.
 
@@ -26,20 +39,12 @@ class SpatialGraphAnalyzer:
         ----------
         adata : ad.AnnData
             Annotated data object containing spatial coordinates.
-        sample : str
-            Sample identifier.
-        sample_key : str
-            Key in adata.obs identifying the sample column.
         radius : int, default 100
             Radius for neighbor graph construction.
         degree_threshold : int, default 5
             Minimum degree threshold for filtering points.
         filter_obs : bool, default False
             Whether to filter observations by sample.
-        convert_units : bool, default True
-            Whether to convert units using pixel_size.
-        pixel_size : float, default 0.322
-            Pixel size for unit conversion.
 
         Returns
         -------
@@ -51,7 +56,7 @@ class SpatialGraphAnalyzer:
         if len(df) < 4:
             return pd.DataFrame(
                 {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[index],
+                index=[self.index],
             )
         pts = df.to_numpy()
         # neighbor graph
@@ -68,49 +73,39 @@ class SpatialGraphAnalyzer:
         if len(df_filtered) < 4:
             return pd.DataFrame(
                 {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[index],
+                index=[self.index],
             )
         pts = df_filtered[coordinate_cols].to_numpy()
         for i in range(pts.shape[-1]):
             if len(np.unique(pts[:, i])) == 1:
                 return pd.DataFrame(
                     {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                    index=[index],
+                    index=[self.index],
                 )
         chull = ConvexHull(pts)
         df_results = pd.DataFrame(
             {'volume_chull': chull.volume, 'area_chull': chull.area},
-            index=[index],
+            index=[self.index],
         )
         df_results['density_chull'] = len(pts) / df_results['volume_chull']
         return df_results
 
     def get_chulls_connected_components(
-        self, clusters: list, cluster_key: str, radius: int = 100, min_nds=10
+        self, clusters: list, radius: int = 100, min_nds=10, min_degree=3
     ) -> pd.DataFrame:
         """
         Calculate convex hull for connected components in subset of spatial graph.
 
         Parameters
         ----------
-        adata : ad.AnnData
-            Annotated data object containing spatial coordinates.
-        well : str
-            Well identifier.
-        plate : str
-            Plate identifier.
         clusters : list
             List of cluster identifiers to include.
+        cluster_key : str
+            Key for cluster labels.
         radius : int, default 100
             Radius for neighbor graph construction.
         min_nds : int, default 10
             Minimum number of nodes for connected components.
-        convert_units : bool, default True
-            Whether to convert units using pixel_size.
-        pixel_size : float, default 0.322
-            Pixel size for unit conversion.
-        plot : bool, default False
-            Whether to plot the graph.
 
         Returns
         -------
@@ -118,14 +113,11 @@ class SpatialGraphAnalyzer:
             DataFrame containing convex hull metrics for each connected component.
         """
         # get center of mass
-        graph_center = (
-            self.adata.obs[['z', 'centroid-0', 'centroid-1']].to_numpy().mean(axis=0)
-        )
-        adata = self.adata[self.adata.obs[cluster_key].isin(clusters)]
-        df = adata.obs[['z', 'centroid-0', 'centroid-1']]
-        if df.empty:
+        graph_center = self.adata.obsm[self.spatial_key].mean(axis=0)
+        adata = self.adata[self.adata.obs[self.cluster_key].isin(clusters)]
+        pts = adata.obsm[self.spatial_key].copy()
+        if pts.shape[0] == 0:
             return pd.DataFrame()
-        pts = df.to_numpy()
         # neighbor graph
         G = nx.from_numpy_array(
             radius_neighbors_graph(
@@ -133,14 +125,14 @@ class SpatialGraphAnalyzer:
             ).toarray(),
             create_using=nx.DiGraph,
         ).to_undirected()
-        # filter out points that have less than 3 connections
+        # filter out points that have less than min_degree connections
         for node in list(G.nodes):
-            if G.degree[node] < 3:
+            if G.degree[node] < min_degree:
                 G.remove_node(node)
         if len(G.nodes) <= min_nds:
             return pd.DataFrame()
         # selected connected components
-        df_results = []
+        df = []
         for i, component in enumerate(list(nx.connected_components(G))):
             if len(component) >= min_nds:
                 pts_component = pts[list(component)]
@@ -158,22 +150,25 @@ class SpatialGraphAnalyzer:
                     {
                         'volume_chull': chull.volume,
                         'area_chull': chull.area,
-                        'n_pts_chull': len(pts_component),
+                        'n_chull': len(pts_component),
                         'distance_center_chull': distance_center,
                     },
                     index=[str(i)],
                 )
                 df_component['density_chull'] = (
-                    df_component['volume_chull'] / df_component['n_pts']
+                    df_component['volume_chull'] / df_component['n_chull']
                 )
-                df_results.append(df_component)
-        if len(df_results) == 0:
+                df.append(df_component)
+        if len(df) == 0:
             return pd.DataFrame()
-        df_results = pd.concat(df_results)
-        # filter n_pts for min_nds
-        df_results = df_results[df_results['n_pts_chull'] >= min_nds]
 
-    def get_interactions(self, cluster_key: str, index: str = None) -> pd.DataFrame:
+        df = pd.concat(df)
+
+        # filter n_pts for min_nds
+        df = df[df['n_chull'] >= min_nds]
+        return df
+
+    def get_interactions(self) -> pd.DataFrame:
         """
         Calculate interaction matrices between clusters.
 
@@ -194,12 +189,15 @@ class SpatialGraphAnalyzer:
 
         # interaction matrix
         results = []
-        adata = self.adata.copy()
         for i in (True, False):
-            sq.gr.interaction_matrix(adata, cluster_key=cluster_key, normalized=i)
-            df_interaction = pd.DataFrame(adata.uns[f'{cluster_key}_interactions'])
+            sq.gr.interaction_matrix(
+                self.adata, cluster_key=self.cluster_key, normalized=i
+            )
+            df_interaction = pd.DataFrame(
+                self.adata.uns[f'{self.cluster_key}_interactions']
+            )
             cluster_names = pd.Categorical(
-                adata.obs[cluster_key].cat.categories
+                self.adata.obs[self.cluster_key].cat.categories
             ).tolist()
             df_interaction.columns = cluster_names
             df_interaction.index = cluster_names
@@ -219,12 +217,12 @@ class SpatialGraphAnalyzer:
             df_interaction = df_interaction.drop(columns=['from', 'to'])
             df_interaction = df_interaction.T
             df_interaction = df_interaction.reset_index(drop=True)
-            df_interaction.index = [index]
+            df_interaction.index = [self.index]
             results.append(df_interaction)
         df_interaction = pd.concat(results, axis=1)
         return df_interaction
 
-    def get_moran(self, index) -> pd.DataFrame:
+    def get_moran(self) -> pd.DataFrame:
         """
         Calculate Moran's I spatial autocorrelation for features.
 
@@ -244,7 +242,7 @@ class SpatialGraphAnalyzer:
         """
         adata = self.adata.copy()
         if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
-            df_moran = pd.DataFrame(0, index=[index], columns=adata.var_names)
+            df_moran = pd.DataFrame(0, index=[self.index], columns=adata.var_names)
             return df_moran
         sq.gr.spatial_autocorr(
             adata,
@@ -257,13 +255,11 @@ class SpatialGraphAnalyzer:
         )
         df_moran = pd.DataFrame(adata.uns['moranI'])
         df_moran = df_moran[['I']].T
-        df_moran.index = [index]
+        df_moran.index = [self.index]
         df_moran.columns = ['moranI_' + col for col in df_moran.columns]
         return df_moran
 
-    def get_moran_cluster(
-        self, index:str, cluster_key: str
-    ) -> pd.DataFrame:
+    def get_moran_cluster(self) -> pd.DataFrame:
         """
         Calculate Moran's I spatial autocorrelation for cluster assignments.
 
@@ -281,14 +277,13 @@ class SpatialGraphAnalyzer:
         pd.DataFrame
             DataFrame containing Moran's I values for each cluster.
         """
-        adata = self.adata.copy()
-        # one hot encode cluster labels 
-        df = pd.get_dummies(adata.obs[cluster_key]).astype(int)
-        adata_cl = ad.AnnData(df, obs=adata.obs, obsm=adata.obsm, obsp=adata.obsp)
-        if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
-            df_moran = pd.DataFrame(
-                0, index=[index], columns=adata.var_names
-            )
+        # one hot encode cluster labels
+        df = pd.get_dummies(self.adata.obs[self.cluster_key]).astype(int)
+        adata_cl = ad.AnnData(
+            df, obs=self.adata.obs, obsm=self.adata.obsm, obsp=self.adata.obsp
+        )
+        if np.sum(self.adata.obsp.get('spatial_connectivities').toarray()) == 0:
+            df_moran = pd.DataFrame(0, index=[self.index], columns=self.adata.var_names)
             return df_moran
         sq.gr.spatial_autocorr(
             adata_cl,
@@ -301,182 +296,178 @@ class SpatialGraphAnalyzer:
         )
         df_moran = pd.DataFrame(adata_cl.uns['moranI'])
         df_moran = df_moran[['I']].T
-        df_moran.index = [index]
+        df_moran.index = [self.index]
         # add moranI prefix to all columns
         df_moran.columns = ['moranI_' + col for col in df_moran.columns]
         return df_moran
 
+    def get_centrality(self) -> pd.DataFrame:
+        """
+        Get centrality
+        :param adata:
+        :param well:
+        :param plate:
+        :return:
+        """
+        # centrality scores
+        sq.gr.centrality_scores(
+            self.adata, cluster_key=self.cluster_key, connectivity_key='spatial'
+        )
+        df_centrality = pd.DataFrame(
+            self.adata.uns[f'{self.cluster_key}_centrality_scores']
+        )
+        cluster_names = pd.Categorical(
+            self.adata.obs[self.cluster_key].cat.categories
+        ).tolist()
+        df_centrality.index = cluster_names
+        # pivot wide new column names are column_names-index
+        df_centrality = df_centrality.stack().reset_index()
+        df_centrality.columns = ['from', 'to', 'value']
+        df_centrality.index = (
+            'centrality_' + df_centrality['from'] + '_' + df_centrality['to']
+        )
+        df_centrality = df_centrality.drop(columns=['from', 'to'])
+        df_centrality = df_centrality.T
+        df_centrality.index = [self.index]
+        return df_centrality
+
+    def get_connectivity(self) -> pd.DataFrame:
+        """
+        Get connectivity
+        """
+        # get mean connectivity
+        degrees = self.adata.obsp['spatial_connectivities'].sum(axis=0)
+        mean_degree = degrees.mean()
+        std_degree = degrees.std()
+        df_degree = pd.DataFrame(
+            {'mean': mean_degree, 'std': std_degree}, index=[self.index]
+        )
+        # for each cluster
+        cluster_names = pd.Categorical(
+            self.adata.obs[self.cluster_key].cat.categories
+        ).tolist()
+        mean_degree_cluster = [
+            degrees[:, self.adata.obs[self.cluster_key] == cluster].mean()
+            for cluster in cluster_names
+        ]
+        str_degree_cluster = [
+            degrees[:, self.adata.obs[self.cluster_key] == cluster].std()
+            for cluster in cluster_names
+        ]
+        df_degree_cluster = pd.DataFrame(
+            {'mean': mean_degree_cluster, 'std': str_degree_cluster},
+            index=cluster_names,
+        )
+        # pivot wide and merge with df_degree
+        df_degree_cluster = df_degree_cluster.stack().reset_index()
+        df_degree_cluster.columns = ['from', 'metric', 'value']
+        df_degree_cluster = df_degree_cluster.pivot_table(
+            index='from', columns='metric', values='value'
+        )
+        df_degree_cluster.index = 'degree_' + df_degree_cluster.index
+        df_degree_cluster = df_degree_cluster.T
+        df_degree_cluster = df_degree_cluster.stack().reset_index()
+        df_degree_cluster.columns = ['from', 'metric', 'value']
+        df_degree_cluster['metric_combined'] = (
+            df_degree_cluster['metric'] + '_' + df_degree_cluster['from']
+        )
+        df_degree_cluster = df_degree_cluster.drop(columns=['from', 'metric'])
+        # pivot wide so 1 row remains
+        df_degree_cluster = df_degree_cluster.pivot_table(
+            columns='metric_combined', values='value'
+        )
+        df_degree_cluster.index = [self.index]
+        df_degree = pd.concat([df_degree, df_degree_cluster], axis=1)
+        return df_degree
+
+    def get_counts(self):
+        df_counts = (
+            self.adata.obs.groupby(self.cluster_key)
+            .size()
+            .reset_index(index=[self.index])
+        )
+        df_counts.columns = ['cluster', 'count']
+        df_counts['total'] = self.adata.obs.shape[0]
+        df_counts.index = [self.index]
+
+        return df_counts
+
     def get_spatial_stats(
         self,
-        sample: str,
-        sample_key: str,
-        spatial_key: str,
-        adata: ad.AnnData,
-        radii: tuple[int] = (25, 50, 100, 150),
-        radius_chull: int = 100,
-        layer: str = None,
-        cluster_key: str = None,
-    ) -> pd.DataFrame:
+        radius,
+    ) -> dict:
         """
-        Calculate comprehensive spatial statistics for a sample.
+        Calculate spatial statistics for a sample.
 
         Parameters
         ----------
-        sample : str
-            Sample identifier.
-        sample_key : str
-            Key in adata.obs identifying the sample column.
-        adata : ad.AnnData
-            Annotated data object containing spatial coordinates.
-        radii : tuple[int], default (25, 50, 100, 150)
-            Radii for spatial neighbor calculations.
-        radius_chull : int, default 100
-            Radius for convex hull calculations.
-        layer : str, optional
-            Layer to use for expression data.
-        cluster_key : str, optional
-            Key for cluster assignments.
+        radius : int
+            Radius for spatial neighbor calculations.
 
         Returns
         -------
         pd.DataFrame
             DataFrame containing all spatial statistics for the sample.
         """
-        adata = adata[adata.obs[sample_key] == sample]
-        adata = adata.copy()
-        if layer is not None:
-            adata.X = adata.layers[layer].copy()
-            # remove layer
-            adata.layers[layer] = None
-        if cluster_key is None:
+        if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
-        # generate spatial obsm
+
+        assert len(self.adata.obs[self.cluster_key].unique()) > 1
+
+        sq.gr.spatial_neighbors(
+            self.adata,
+            radius=radius,
+            coord_type='generic',
+            spatial_key=self.spatial_key,
+        )
+        clusters = self.adata.obs[self.cluster_key].unique().tolist()
+
+        dict = {
+            'interactions': self.get_interactions(),
+            'centrality': self.get_centrality(),
+            'connectivity': self.get_connectivity(),
+            'moran_features': self.get_moran(),
+            'moran_clusters': self.get_moran_cluster(),
+            'chull_all': self.get_chulls_connected_components(
+                clusters=clusters, radius=radius
+            ),
+        }
+        for cluster in clusters:
+            dict[f'chull_cluster:{cluster}'] = self.get_chulls_connected_components(
+                clusters=[cluster], radius=radius
+            )
+
+        # average all chull dataframes in results and add number of chulls as one column
+        for result in [key for key in dict.keys() if 'chull' in key]:
+            if dict[result].empty:
+                continue
+            n_obs = dict[result].shape[0]
+            df_mean = pd.DataFrame(dict[result].mean(axis=0)).T
+            df_mean.columns = [col + '_mean' for col in df_mean.columns]
+            df_sd = pd.DataFrame(dict[result].std(axis=0)).T
+            df_sd.columns = [col + '_sd' for col in df_sd.columns]
+            dict[result] = pd.concat([df_mean, df_sd], axis=1)
+            dict[result]['n_obs_chull'] = n_obs
+
+        return dict
+
+    def to_df(self):
         df = []
-        for radius in radii:
-            sq.gr.spatial_neighbors(
-                adata, radius=radius, coord_type='generic', spatial_key=spatial_key
-            )
-
-            # calculate spatial features
-            df_spatial_features = pd.concat(
-                [
-                    self.get_interactions(self.adata, sample),
-                    self.get_centrality(self.adata, sample),
-                    self.get_connectivity(self.adata, sample),
-                    self.get_moran(self.adata, sample),
-                    self.get_moran_cluster(self.adata, sample),
-                    self.get_neighborhood_enrichment(self.adata, sample),
-                ],
-                axis=1,
-            )
-            # radius as suffix to all columns
-            df_spatial_features.columns = [
-                col + f'_{radius}' for col in df_spatial_features.columns
-            ]
-            df.append(df_spatial_features)
-
+        for radius in self.results.keys():
+            for result in self.results[radius].keys():
+                # add radius as prefix to all columns
+                if self.results[radius][result].empty:
+                    continue
+                self.results[radius][result].columns = [
+                    f'radius:{radius}_' + col
+                    for col in self.results[radius][result].columns
+                ]
+                df.append(self.results[radius][result].reset_index())
+        self.tmp = df.copy()
         df = pd.concat(df, axis=1)
-        df_chull = self.get_chull(adata, sample, radius=radius_chull)
-        df = pd.concat([df, df_chull], axis=1)
         return df
 
-    def run_spatial_feature_processing(
-        self, mdata, radii: tuple[int] = (25, 50, 100, 150), radius_chull: int = 100
-    ):
-        """
-        Run spatial feature processing across all modalities in MuData object.
-
-        Parameters
-        ----------
-        mdata : MuData
-            Multi-modal data object containing spatial coordinates and clusters.
-        radii : tuple[int], default (25, 50, 100, 150)
-            Radii for spatial neighbor calculations.
-        radius_chull : int, default 100
-            Radius for convex hull calculations.
-
-        Returns
-        -------
-        dict
-            Dictionary with modality names as keys and spatial feature DataFrames as values.
-        """
-        spatial_dict = {}
-        df_qc = []
-        for mod in mdata.mod_names:
-            n_cluster = len(mdata[mod].obs['leiden'].unique())
-            assert n_cluster > 1
-            df_tmp = (
-                mdata[mod]
-                .obs.groupby(['well_id', 'plate_id', 'leiden'], observed=False)
-                .size()
-                .reset_index(name='count')
-            )
-            df_tmp[f'detected_{mod}'] = df_tmp['count'] > 0
-            df_tmp = (
-                df_tmp.groupby(['well_id', 'plate_id'], observed=False)[
-                    f'detected_{mod}'
-                ]
-                .agg('sum')
-                .reset_index()
-            )
-            df_tmp[f'detected_{mod}'] = df_tmp[f'detected_{mod}'] > 1
-            # set index
-            df_tmp = df_tmp.set_index(['well_id', 'plate_id'])
-            df_qc.append(df_tmp)
-
-        df_qc = pd.concat(df_qc, axis=1).all(axis=1).reset_index(name='selected')
-
-        for mod in mdata.mod_names:
-            df = (
-                mdata[mod]
-                .obs.groupby(['well_id', 'plate_id'], observed=False)
-                .size()
-                .reset_index(name='cell_count')
-            )
-            df = df[df['cell_count'] > 0]
-            df = df.merge(
-                df_qc[df_qc['selected']], on=['well_id', 'plate_id'], how='inner'
-            )
-            df = df.drop(columns=['selected'])
-            df.index = df['well_id'].astype(str) + '_' + df['plate_id'].astype(str)
-            df_stats = pd.concat(
-                [
-                    self.get_spatial_stats(well, plate, mdata[mod], radii, radius_chull)
-                    for well, plate in tqdm(
-                        zip(df['well_id'], df['plate_id']),
-                        desc=f'Spatial statistics - {mod}',
-                        total=df.shape[0],
-                    )
-                ]
-            ).fillna(0)
-            df_stats.columns = [f'{mod}_stat_' + col for col in df_stats.columns]
-            # add prefix to leiden
-            df_counts = (
-                mdata[mod]
-                .obs.groupby(['well_id', 'plate_id', 'leiden'], observed=False)[
-                    'leiden'
-                ]
-                .count()
-                .reset_index(name='count')
-            )
-            df_counts['leiden'] = f'{mod}_' + df_counts['leiden'].astype(str)
-            df_counts = df_counts.pivot_table(
-                index=['well_id', 'plate_id'],
-                columns='leiden',
-                values='count',
-                observed=False,
-            )
-            df_counts.reset_index(inplace=True)
-            df_counts.index = (
-                df_counts['well_id'].astype(str)
-                + '_'
-                + df_counts['plate_id'].astype(str)
-            )
-            df_counts = df_counts.drop(columns=['well_id', 'plate_id'])
-            # merge counts in
-            df = pd.merge(df, df_counts, left_index=True, right_index=True, how='left')
-            # merge stats in
-            df = pd.merge(df, df_stats, left_index=True, right_index=True, how='inner')
-            spatial_dict[mod] = df
-
-        return spatial_dict
+    def run(self) -> None:
+        self.results = dict()
+        for radius in self.radii:
+            self.results[radius] = self.get_spatial_stats(radius)

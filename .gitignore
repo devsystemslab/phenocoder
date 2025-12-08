@@ -1,4 +1,5 @@
 .idea/
+.zed/
 .venv/
 .ropeproject/
 .pytest_cache/

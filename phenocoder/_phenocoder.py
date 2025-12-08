@@ -11,6 +11,7 @@ import yaml
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
+from phenocoder.spatial import SpatialGraphAnalyzer
 from phenocoder.utils import plot_latent_space, plot_reconstructions, plot_to_image
 
 
@@ -521,28 +522,6 @@ class Phenocoder:
         adata.obs['label'] = adata.obs.index.copy()
         return adata
 
-    def cluster(self) -> None:
-        """
-        Cluster the encoded latent representations of nuclei.
-
-        Performs clustering analysis on the latent space representations obtained
-        from the encode() method. The clustering results should be stored back
-        in the SpatialData object for downstream analysis.
-
-        Returns:
-            None
-
-        Note:
-            This method is not yet implemented. Implementation should use
-            the run_clustering function and store results in sdata.tables.
-
-        Todo:
-            - Implement clustering algorithm selection
-            - Add parameters for clustering hyperparameters
-            - Store clustering results in sdata.tables
-        """
-        pass
-
     def spatialgraph_stats(self) -> None:
         """
         Generate statistics for spatial neighborhood graphs of each sample.
@@ -564,6 +543,7 @@ class Phenocoder:
             - Store results in sdata.tables with appropriate keys
         """
         pass
+        # TODO: add analyze methods than runs SpatialGraphAnalyzer over all samples
 
     def spatialgraph_embedding(self) -> None:
         """

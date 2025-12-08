@@ -10,6 +10,8 @@ dependencies = [
     "squidpy>=1.6.5",
     "bbknn>=1.6.0",
     "spatialdata-plot>=0.2.12",
+    "igraph>=1.0.0",
+    "leidenalg>=0.11.0",
 ]
 
 [dependency-groups]
