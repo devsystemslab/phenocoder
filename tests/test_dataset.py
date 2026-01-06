@@ -1,14 +1,11 @@
 import shutil
 
-import IPython
-
 from phenocoder import generator
 from tests.conftest import example_3d
 
 
-def test_dataset():
+def test_dataset_generator():
     pheno = example_3d()
-    # IPython.embed(colors='linux')
     data_generator = generator.PatchGenerator(
         dataset='test_dataset',
         sdata=pheno.sdata,
@@ -23,4 +20,4 @@ def test_dataset():
 
 
 if __name__ == '__main__':
-    test_dataset()
+    test_dataset_generator()

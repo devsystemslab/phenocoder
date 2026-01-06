@@ -52,22 +52,54 @@ class Phenocoder:
         Initialize a new Phenocoder instance.
 
         Args:
-            **kwargs: Additional keyword arguments (currently unused).
+            **kwargs: Optional keyword arguments to set initial attributes. Supported keys:
+                - sdata: SpatialData instance
+                - adata: AnnData instance
+                - model: preconstructed model (CVAE or CondCVAE)
+                - model_dir: path to model directory
+                - model_oh_enc: one-hot encoder for conditional models
+                - model_config: model configuration dict or path to config
+                - sample_key: key used to identify samples in sdata tables
+                - spatial_key: spatial key name/index
+                - table_key: table key in sdata.tables
+                - data_dir: base directory for datasets
+                - datasets: list of dataset identifiers
+                - data_generator_train: training data generator
+                - data_generator_val: validation data generator
+                - df_conditions: DataFrame of condition labels
+                - image_key: key of images in sdata.images
+
+        Any attributes not provided in kwargs will be initialized to None.
         """
-        self.sdata: sd.SpatialData = None
-        self.adata: ad.AnnData = None
-        self.model: CVAE | CondCVAE = None
-        self.model_dir: str | Path = None
-        self.model_oh_enc = None
-        self.model_config = None
-        self.sample_key: str = None
-        self.spatial_key: str = None
-        self.table_key: str = None
-        self.data_dir: str | Path = None
-        self.datasets: list[str] = None
-        self.data_generator_train = None
-        self.data_generator_val = None
-        self.df_conditions = None
+        # Core data containers
+        self.sdata: sd.SpatialData | None = kwargs.get('sdata', None)
+        self.adata: ad.AnnData | None = kwargs.get('adata', None)
+
+        # Model-related
+        self.model: CVAE | CondCVAE | None = kwargs.get('model', None)
+        self.model_dir: str | Path | None = kwargs.get('model_dir', None)
+        self.model_oh_enc = kwargs.get('model_oh_enc', None)
+        # historical/alternate name used in some methods, keep in sync if provided
+        self.oh_enc = kwargs.get('oh_enc', self.model_oh_enc)
+        self.model_config = kwargs.get('model_config', None)
+
+        # Keys for sdata access
+        self.sample_key: str | None = kwargs.get('sample_key', None)
+        self.spatial_key: str | None = kwargs.get('spatial_key', None)
+        self.table_key: str | None = kwargs.get('table_key', None)
+        self.image_key: str | None = kwargs.get('image_key', None)
+
+        # Dataset and generator related
+        self.data_dir: str | Path | None = kwargs.get('data_dir', None)
+        self.datasets: list[str] | None = kwargs.get('datasets', None)
+        self.data_generator_train = kwargs.get('data_generator_train', None)
+        self.data_generator_val = kwargs.get('data_generator_val', None)
+        self.df_conditions = kwargs.get('df_conditions', None)
+
+        # Other optional attributes that may be set later
+        self.model_name: str | None = kwargs.get('model_name', None)
+        self.dir_tensorboard: Path | None = kwargs.get('dir_tensorboard', None)
+        self.data_loader = kwargs.get('data_loader', None)
 
     def add_sdata(self, sdata: sd.SpatialData) -> None:
         """
@@ -85,6 +117,7 @@ class Phenocoder:
             >>> phenocoder.add_sdata(sdata)
         """
         self.sdata = sdata
+        self.validate_sdata()
 
     def validate_sdata(self) -> None:
         """
@@ -101,16 +134,13 @@ class Phenocoder:
         """
         if self.sample_key is None:
             raise ValueError('Sample key is not set.')
-        if self.sample_key not in self.sdata.table[self.table_key].obs.columns:
+        if self.sample_key not in self.sdata.tables[self.table_key].obs.columns:
             raise ValueError(
-                f'Sample key "{self.sample_key}" not found in sdata.table["{self.table_key}"]'
+                f'Sample key "{self.sample_key}" not found in sdata.tables["{self.table_key}"]'
             )
         else:
             pass
 
-    # TODO: update method signature, etc and dataset generator to work with sdata
-    # TODO: CRITICAL - Method signature is file-based (dir_input, dir_segmented) instead of using self.sdata
-    # TODO: DatasetGenerator should be initialized with sdata, not file paths
     def generate_dataset(self, dataset, dir_dataset, spatial_key_index=None) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -147,7 +177,6 @@ class Phenocoder:
             spatial_key=spatial_key_index,
         )
         dataset_generator.generate_dataset()
-        dataset_generator.save_stats()
 
     def initialize_model(
         self,
@@ -206,12 +235,18 @@ class Phenocoder:
         self.model_dir = Path(self.data_dir, 'models', self.model_name)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
+        self.data_loader = DatasetLoader(
+            datasets=self.datasets,
+            dir_datasets=self.data_dir,
+            sample_key=self.sample_key,
+        )
+        self.data_loader.load_datasets()
         (
             self.data_generator_train,
             self.data_generator_val,
             self.df_conditions,
             self.model_oh_enc,
-        ) = setup_generators(
+        ) = self.data_loader.setup_generators(
             self.datasets,
             self.data_dir,
             conditional,
@@ -233,16 +268,14 @@ class Phenocoder:
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
-            'quantiles_low': self.data_generator_train.quantiles_low.tolist(),
-            'quantiles_high': self.data_generator_train.quantiles_high.tolist(),
+            'quantiles_low': self.data_generator_train.percentiles_low.tolist(),
+            'quantiles_high': self.data_generator_train.percentiles_high.tolist(),
             'conditions_dim': self.data_generator_train.conditions.shape[-1],
         }
 
         with open(Path(self.model_dir, 'config.yaml'), 'w') as file:
             yaml.dump(self.model_config, file)
         joblib.dump(self.model_oh_enc, Path(self.model_dir, 'oh_encoder.joblib'))
-
-        # self.df_conditions.to_csv(Path(self.model_dir, 'df_files.csv'), index=False)
 
         # set up model
         if conditional:
@@ -293,6 +326,7 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
                 n_classes=self.model_config['conditions_dim'],
             )
+            self.oh_enc = joblib.load(f'{self.model_directory}/oh_encoder.joblib')
         else:
             self.model = CVAE(
                 input_shape=tuple(self.model_config['input_shape']),
@@ -302,7 +336,6 @@ class Phenocoder:
             )
         self.model.compile()
         self.model.load_weights(f'{self.model_directory}/model.weights.h5')
-        self.oh_enc = joblib.load(f'{self.model_directory}/oh_encoder.joblib')
 
     def summarize_model(self) -> None:
         """
@@ -398,7 +431,7 @@ class Phenocoder:
         self.model.save_weights(Path(self.model_dir, 'model.weights.h5'))
 
         if plot:
-            file_writer = tf.summary.create_file_writer(self.dir_tensorboard)
+            file_writer = tf.summary.create_file_writer(str(self.dir_tensorboard))
             figure_reconstructions = plot_reconstructions(
                 self.model,
                 self.data_generator_train,
@@ -511,7 +544,7 @@ class Phenocoder:
             df.index = (
                 df['label'].astype(str) + '_' + df['well_id'] + '_' + df['plate_id']
             )
-            # TODO: Should store results in sdata.tables instead of creating standalone AnnData
+            # TODO: Should store results in sdata.tables instead of creating standalone AnnData -> sdata.parse table or add as obsm to existing table
             adata = ad.AnnData(
                 X=df_z.values,
                 obs=df,

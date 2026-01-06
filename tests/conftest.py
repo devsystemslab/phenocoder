@@ -167,12 +167,14 @@ def example_3d():
     )
 
     # setup phenocoder
-    pheno = phc.Phenocoder()
+    pheno = phc.Phenocoder(
+        table_key='nuclei_features',
+        sample_key='well',
+        image_key='IF',
+        labels_key='nuclei',
+    )
     pheno.add_sdata(sdata)
-    pheno.table_key = 'nuclei_features'
-    pheno.sample_key = 'well'
-    pheno.image_key = 'IF'
-    pheno.labels_key = 'nuclei'
+
     return pheno
 
 

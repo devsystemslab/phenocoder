@@ -13,7 +13,7 @@ def test_3d():
         spatial_key_index='spatial_index',
     )
     pheno.initialize_model(n_latent_dim=32, n_dense_dim=64, conditional=True)
-    pheno.train()
+    pheno.train(n_epochs=5)
     pheno.encode()
 
 

@@ -12,7 +12,7 @@ class PatchGenerator:
     """
     Generator for image patches and image patch datasets from spatial data.
 
-    This class handles the extraction of image patches and their statistics
+    This class handles the extraction of image patches and statistics
     from spatial data objects, primarily for use in deep learning workflows.
     """
 
@@ -244,13 +244,8 @@ class PatchGenerator:
         df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
         img_key_sample = '_'.join([self.image_key, sample_id])
         img = np.asarray(self.sdata.images[img_key_sample])
-        for id in tqdm(
-            df_patches_sample['id'], desc=f'Writing patches for {sample_id}'
-        ):
-            np.save(
-                os.path.join(self.dir_dataset, f'{sample_id}_{id}.npy'),
-                self.extract_patch(img, id),
-            )
+        for id, file in zip(df_patches_sample['id'], df_patches_sample['file']):
+            np.save(Path(self.dir_dataset, file), self.extract_patch(img, id))
 
     def generate_dataset(
         self,
@@ -281,11 +276,12 @@ class PatchGenerator:
         if n_patches is not None:
             self.patches = self.patches.sample(n_patches, replace=False)
             self.samples = self.patches[self.sample_key].unique()
-
-        [
-            self.write_patches(id)
-            for id in tqdm(self.samples, desc='Writing sampled patches')
-        ]
+        self.patches['file'] = self.patches.apply(
+            lambda row: f'{row[self.sample_key]}_{row["id"]}.npy',
+            axis=1,
+        )
+        self.patches.to_csv(Path(self.dir_dataset, 'patches.csv'))
+        [self.write_patches(id) for id in tqdm(self.samples, desc='Writing patches')]
 
 
 class SequenceGenerator(Sequence):
@@ -387,6 +383,8 @@ class SequenceGenerator(Sequence):
 
         if self.scale:
             for i in range(X.shape[-1]):
+                if self.percentiles_high[i] == self.percentiles_low[i]:
+                    self.percentiles_high[i] += 1
                 X[..., i] = np.clip(
                     (X[..., i] - self.percentiles_low[i])
                     / (self.percentiles_high[i] - self.percentiles_low[i]),
@@ -439,7 +437,7 @@ class SequenceGenerator(Sequence):
         # Generate data
         for i, idx in enumerate(list_ids_temp):
             # Store sample
-            X[i,] = np.load(idx)
+            X[i,] = np.moveaxis(np.load(idx), 0, -1)
 
         return X
 
@@ -452,7 +450,7 @@ class DatasetLoader:
     provides unified access to files and scaling parameters.
     """
 
-    def __init__(self, datasets: list, dir_datasets: str):
+    def __init__(self, datasets: list, dir_datasets: str, sample_key: str):
         """
         Initialize DatasetMerger.
 
@@ -465,6 +463,7 @@ class DatasetLoader:
         """
         self.dir_datasets = dir_datasets
         self.datasets = datasets
+        self.sample_key = sample_key
         self.stats_imgs = None
         self.patches = None
 
@@ -472,28 +471,24 @@ class DatasetLoader:
         """
         Loads and merge statistics from all specified datasets.
 
-        Combines stats.csv and stats_patches_sampled.csv files from each
+        Combines stats.csv files from each
         dataset directory and creates unified dataframes with file paths.
         """
         self.stats = []
+        self.patches = []
         for dataset in self.datasets:
             self.stats.append(
                 pd.read_csv(Path(self.dir_datasets, dataset, 'stats.csv')).assign(
                     dataset=dataset
                 )
             )
+            self.patches.append(
+                pd.read_csv(Path(self.dir_datasets, dataset, 'patches.csv')).assign(
+                    dataset=dataset
+                )
+            )
         self.stats = pd.concat(self.stats)
-
-    def get_files(self):
-        """
-        Get list of all patch files from merged datasets.
-
-        Returns
-        -------
-        list
-            List of unique file paths for all patches
-        """
-        return self.patches['file_path'].unique().tolist()
+        self.patches = pd.concat(self.patches)
 
     def get_scaling_stats(self):
         """
@@ -505,40 +500,9 @@ class DatasetLoader:
             Tuple of (percentiles_low, percentiles_high) for each channel,
             representing the global min/max quantiles for normalization
         """
-        percentiles_low = self.stats.groupby('channel')['quantile_low'].min()
-        percentiles_high = self.stats.groupby('channel')['quantile_high'].max()
+        percentiles_low = self.stats.groupby('channel')['percentile_low'].min()
+        percentiles_high = self.stats.groupby('channel')['percentile_high'].max()
         return percentiles_low, percentiles_high
-
-    def extract_conditions(self, files, dir_datasets):
-        """
-        Extract conditions from file paths.
-
-        Parameters
-        ----------
-        files : list
-            List of file paths
-        dir_datasets : str
-            Directory containing datasets
-
-        Returns
-        -------
-        tuple
-            Dataset conditions and z-stack conditions
-        """
-        conditions_dataset = []
-        conditions_z = []
-        for f in files:
-            # remove dir_datasets from path
-            f = f.replace(f'{dir_datasets}/', '')
-            # extract digit between _ and _
-            f = f.split('/')
-            # extract condition
-            condition_dataset = f[0]
-            condition_z = f[-1].split('_')[1]
-            conditions_dataset.append(condition_dataset)
-            conditions_z.append(int(condition_z))
-
-        return conditions_dataset, conditions_z
 
     def setup_generators(
         self,
@@ -579,54 +543,49 @@ class DatasetLoader:
         tuple
             Training generator, validation generator, dataframe, and encoder
         """
-        self.merge_datasets()
-        files = self.get_files()
+        self.load_datasets()
         percentiles_low, percentiles_high = self.get_scaling_stats()
-        if conditional:
-            conditions_dataset, conditions_z = self.extract_conditions(
-                files, dir_datasets
-            )
-            df = pd.DataFrame(
-                {'file': files, 'dataset': conditions_dataset, 'z': conditions_z}
-            )
-        else:
-            df = pd.DataFrame({'file': files})
         # randomize
-        df = df.sample(frac=1, random_state=42, replace=False)
+        self.patches = self.patches.sample(frac=1, random_state=42, replace=False)
         # get well dataset combinations and split into train and val
-        df['well_id'] = df['file'].apply(lambda x: x.split('/')[-1].split('_')[0])
-        df_well = df.groupby(['well_id', 'dataset']).count()
-        df_well = df_well.reset_index().sample(frac=1, random_state=42, replace=False)
+        df_samples = self.patches.groupby([self.sample_key, 'dataset']).count()
+        df_samples = df_samples.reset_index().sample(
+            frac=1, random_state=42, replace=False
+        )
         # train val split
-        n_train = int(df_well.shape[0] * 0.8)
-        df_well['split'] = [
-            'train' if i < n_train else 'val' for i in range(df_well.shape[0])
+        n_train = int(df_samples.shape[0] * 0.8)
+        df_samples['split'] = [
+            'train' if i < n_train else 'val' for i in range(df_samples.shape[0])
         ]
         # TODO: add stratify by sample key!
         # merge df with df_well_train
-        df = pd.merge(
-            df,
-            df_well[['well_id', 'dataset', 'split']],
-            on=['well_id', 'dataset'],
+        self.patches = pd.merge(
+            self.patches,
+            df_samples[[self.sample_key, 'dataset', 'split']],
+            on=[self.sample_key, 'dataset'],
             how='left',
         )
         # drop remainders of split columns regarding batch_size grouped by split
-        df = (
-            df.groupby('split')
+        self.patches = (
+            self.patches.groupby('split')
             .apply(lambda x: x.iloc[: -(x.shape[0] % batch_size)])
             .reset_index(drop=True)
         )
-        files_train = df[df['split'] == 'train']['file']
-        files_val = df[df['split'] == 'val']['file']
-        # one hot encode conditions with sklearn
-        enc = OneHotEncoder()
-        cond = enc.fit_transform(df[['dataset', 'z']]).toarray()
-        # convert conditions to numpy array
-        cond_train = cond[df['split'] == 'train']
-        cond_val = cond[df['split'] == 'val']
+        # expand files to complete paths and add to path in self.patches -> Path(self.dir_datasets, self.patches['dataset'], file)
+        self.patches['file_path'] = self.patches.apply(
+            lambda x: Path(self.dir_datasets, x['dataset'], x['file']), axis=1
+        )
+
+        if conditional:
+            # one hot encode conditions with sklearn
+            enc = OneHotEncoder()
+            cond = enc.fit_transform(self.patches[['dataset', 'z']]).toarray()
+            # convert conditions to numpy array
+            cond_train = cond[self.patches['split'] == 'train']
+            cond_val = cond[self.patches['split'] == 'val']
         # TODO: fix that the SequenceGenerator just works for the CondVAE...
         generator_train = SequenceGenerator(
-            files_train.values,
+            self.patches[self.patches['split'] == 'train']['file_path'].values,
             conditions=cond_train,
             batch_size=batch_size,
             dim=dim,
@@ -640,7 +599,7 @@ class DatasetLoader:
         )
 
         generator_val = SequenceGenerator(
-            files_val.values,
+            self.patches[self.patches['split'] == 'val']['file_path'].values,
             conditions=cond_val,
             batch_size=batch_size,
             dim=dim,
@@ -653,4 +612,4 @@ class DatasetLoader:
             workers=n_workers,
         )
 
-        return generator_train, generator_val, df, enc
+        return generator_train, generator_val, self.patches, enc

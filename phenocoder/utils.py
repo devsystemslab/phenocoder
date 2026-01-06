@@ -1,14 +1,15 @@
-import numpy as np
-import pandas as pd
+import io
 import os
 from pathlib import Path
+
 import anndata as ad
-from tqdm import tqdm
-import umap
 import matplotlib.pyplot as plt
-import io
+import numpy as np
+import pandas as pd
 import tensorflow as tf
+import umap
 from skimage.util import montage
+from tqdm import tqdm
 
 
 def plot_latent_space(
@@ -16,6 +17,8 @@ def plot_latent_space(
 ):
     reducer = umap.UMAP()
     n_samples = int(sample_frac * len(generator))
+    if n_samples == 0:
+        n_samples = 1
     idx = np.random.choice(range(len(generator)), n_samples, replace=False)
     if generator.return_conditions:
         data, conditions = zip(*[generator[i] for i in idx])
