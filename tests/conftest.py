@@ -105,7 +105,7 @@ def example_3d():
     adata.obsm['spatial'] = adata.obs[['centroid-1', 'centroid-0', 'z_stack']].values
     adata.obsm['spatial_index'] = adata.obs[
         ['centroid-1', 'centroid-0', 'z_init']
-    ].values
+    ].values.astype(int)
     spatial_coords_2d = adata.obs[['centroid-1', 'centroid-0']].values
     adata.obsm['spatial_2d'] = spatial_coords_2d
     adata.obs['instance_id'] = adata.obs.index.astype(int)

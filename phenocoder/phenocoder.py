@@ -6,13 +6,12 @@ import joblib
 import keras
 import pandas as pd
 import spatialdata as sd
-import tensorflow as tf
 import yaml
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.spatial import SpatialGraphAnalyzer
-from phenocoder.utils import plot_latent_space, plot_reconstructions, plot_to_image
+from phenocoder.utils import write_training_plots_to_tensorboard
 
 
 class Phenocoder:
@@ -79,8 +78,7 @@ class Phenocoder:
         self.model: CVAE | CondCVAE | None = kwargs.get('model', None)
         self.model_dir: str | Path | None = kwargs.get('model_dir', None)
         self.model_oh_enc = kwargs.get('model_oh_enc', None)
-        # historical/alternate name used in some methods, keep in sync if provided
-        self.oh_enc = kwargs.get('oh_enc', self.model_oh_enc)
+
         self.model_config = kwargs.get('model_config', None)
 
         # Keys for sdata access
@@ -117,31 +115,10 @@ class Phenocoder:
             >>> phenocoder.add_sdata(sdata)
         """
         self.sdata = sdata
-        self.validate_sdata()
 
-    def validate_sdata(self) -> None:
-        """
-        Validate the SpatialData object for required structure and keys.
-
-        Checks that the sample_key is set and exists in the SpatialData object structure.
-        This method should be called before other operations that depend on the SpatialData object.
-
-        Raises:
-            ValueError: If sample_key is not set or not found in the SpatialData object.
-
-        Returns:
-            None
-        """
-        if self.sample_key is None:
-            raise ValueError('Sample key is not set.')
-        if self.sample_key not in self.sdata.tables[self.table_key].obs.columns:
-            raise ValueError(
-                f'Sample key "{self.sample_key}" not found in sdata.tables["{self.table_key}"]'
-            )
-        else:
-            pass
-
-    def generate_dataset(self, dataset, dir_dataset, spatial_key_index=None) -> None:
+    def generate_dataset(
+        self, dataset, dir_dataset, spatial_key_index=None, scale=True
+    ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
 
@@ -150,15 +127,20 @@ class Phenocoder:
         for training the variational autoencoder model.
 
         Args:
-            dir_dataset (str): Directory path for storing the generated dataset.
+            dataset (str): Name/identifier for the dataset being generated.
+            dir_dataset (str | Path): Directory path for storing the generated dataset.
+            spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array. If None, uses
+                the instance's spatial_key attribute. Defaults to None.
+            scale (bool, optional): Whether to scale the image patches. Defaults to True.
+
         Returns:
             None
 
-        Raises:
-            ValueError: If data_dir is not set.
-
         Example:
-            >>> phenocoder.generate_dataset()
+            >>> phenocoder.generate_dataset(
+            ...     dataset="experiment_001",
+            ...     dir_dataset="/path/to/datasets"
+            ... )
         """
         if spatial_key_index is None:
             spatial_key_index = self.spatial_key
@@ -167,22 +149,21 @@ class Phenocoder:
             self.datasets = [dataset]
         else:
             self.datasets = self.datasets.append(dataset)
-        dataset_generator = PatchGenerator(
-            dataset=dataset,
+        self.patch_generator = PatchGenerator(
             sdata=self.sdata,
-            dir_output=self.data_dir,
             sample_key=self.sample_key,
             table_key=self.table_key,
             image_key=self.image_key,
             spatial_key=spatial_key_index,
+            scale=scale,
         )
-        dataset_generator.generate_dataset()
+        self.patch_generator.generate_dataset(dataset, dir_output=self.data_dir)
 
     def initialize_model(
         self,
         n_latent_dim: int,
         n_dense_dim: int,
-        conditional: bool,
+        conditions: list[str],
         dropout: float = 0.25,
         batch_size: int = 64,
         n_workers: int = 1,
@@ -226,7 +207,7 @@ class Phenocoder:
             ... )
         """
         self.model_name = f'latent_{n_latent_dim}_dense_{n_dense_dim}_dropout_{dropout}_beta_{beta}_{pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")}'
-        if conditional:
+        if conditions:
             self.model_name = f'cond_{self.model_name}'
         if self.data_dir is None:
             raise ValueError('.data_dir must be specified')
@@ -241,44 +222,43 @@ class Phenocoder:
             sample_key=self.sample_key,
         )
         self.data_loader.load_datasets()
-        (
-            self.data_generator_train,
-            self.data_generator_val,
-            self.df_conditions,
-            self.model_oh_enc,
-        ) = self.data_loader.setup_generators(
-            self.datasets,
-            self.data_dir,
-            conditional,
-            batch_size=batch_size,
-            n_workers=n_workers,
-            dim=input_shape[:2],
-            n_channels=input_shape[2],
-            shuffle=True,
-        )
+        self.data_loader.set_train_val_split()
 
         self.model_config = {
             'n_latent_dim': n_latent_dim,
             'n_dense_dim': n_dense_dim,
             'input_shape': list(input_shape),
             'conv_layers': list(conv_layers),
-            'conditional': conditional,
             'dropout': dropout,
             'dir_dataset': self.data_dir,
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
-            'quantiles_low': self.data_generator_train.percentiles_low.tolist(),
-            'quantiles_high': self.data_generator_train.percentiles_high.tolist(),
-            'conditions_dim': self.data_generator_train.conditions.shape[-1],
         }
+
+        if conditions:
+            (
+                self.data_generator_train,
+                self.data_generator_val,
+                self.model_oh_enc,
+            ) = self.data_loader.get_generators(conditions=conditions)
+            self.model_config.update(
+                {
+                    'conditional': True,
+                    'conditions_dim': self.data_generator_train.conditions.shape[-1],
+                }
+            )
+        else:
+            self.data_generator_train, self.data_generator_val = (
+                self.data_loader.get_generators()
+            )
+            self.model_config.update({'conditional': False})
 
         with open(Path(self.model_dir, 'config.yaml'), 'w') as file:
             yaml.dump(self.model_config, file)
-        joblib.dump(self.model_oh_enc, Path(self.model_dir, 'oh_encoder.joblib'))
 
         # set up model
-        if conditional:
+        if self.model_config['conditional']:
             self.model = CondCVAE(
                 n_classes=self.data_generator_train.conditions.shape[-1],
                 input_shape=input_shape,
@@ -288,6 +268,7 @@ class Phenocoder:
                 dropout=dropout,
                 beta=beta,
             )
+            joblib.dump(self.model_oh_enc, Path(self.model_dir, 'oh_encoder.joblib'))
         else:
             self.model = CVAE(
                 input_shape=input_shape,
@@ -326,7 +307,7 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
                 n_classes=self.model_config['conditions_dim'],
             )
-            self.oh_enc = joblib.load(f'{self.model_directory}/oh_encoder.joblib')
+            self.oh_enc = joblib.load(Path(self.model_directory, 'oh_encoder.joblib'))
         else:
             self.model = CVAE(
                 input_shape=tuple(self.model_config['input_shape']),
@@ -335,7 +316,7 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
             )
         self.model.compile()
-        self.model.load_weights(f'{self.model_directory}/model.weights.h5')
+        self.model.load_weights(Path(self.model_directory, 'model.weights.h5'))
 
     def summarize_model(self) -> None:
         """
@@ -361,6 +342,7 @@ class Phenocoder:
         n_epochs: int = 100,
         learning_rate: float = 0.001,
         min_learning_rate: float = 0.0001,
+        factor_learning_rate: float = 0.2,
         learning_rate_patience: int = 3,
         early_stopping_patience: int = 5,
         plot: bool = True,
@@ -420,7 +402,7 @@ class Phenocoder:
                 keras.callbacks.TensorBoard(log_dir=self.dir_tensorboard),
                 keras.callbacks.ReduceLROnPlateau(
                     monitor='val_loss',
-                    factor=0.2,
+                    factor=factor_learning_rate,
                     patience=learning_rate_patience,
                     min_lr=min_learning_rate,
                 ),
@@ -431,35 +413,17 @@ class Phenocoder:
         self.model.save_weights(Path(self.model_dir, 'model.weights.h5'))
 
         if plot:
-            file_writer = tf.summary.create_file_writer(str(self.dir_tensorboard))
-            figure_reconstructions = plot_reconstructions(
-                self.model,
-                self.data_generator_train,
-                n_preview=n_preview,
-                return_fig=True,
-                show=False,
-            )
-            with file_writer.as_default():
-                tf.summary.image(
-                    'input vs reconstruction',
-                    plot_to_image(figure_reconstructions),
-                    step=0,
-                )
-            figure_latent_space = plot_latent_space(
+            write_training_plots_to_tensorboard(
                 self.model,
                 self.data_generator_train,
                 self.model_oh_enc,
-                sample_frac=plot_frac,
-                return_fig=True,
-                show=False,
+                self.dir_tensorboard,
+                n_preview=n_preview,
+                plot_frac=plot_frac,
             )
-            with file_writer.as_default():
-                tf.summary.image(
-                    'latent space', plot_to_image(figure_latent_space), step=0
-                )
 
     def encode(
-        self, batch_size: int = 64, filter_encodable_conditions: bool = False
+        self, batch_size: int = 64, scale=True, spatial_key_index=None
     ) -> ad.AnnData:
         """
         Encode nuclei patches into latent space representations using the trained model.
@@ -484,76 +448,44 @@ class Phenocoder:
             >>> encoded_data = phenocoder.encode(batch_size=128)
             >>> print(encoded_data.shape)  # (n_nuclei, n_latent_dim)
         """
-        results = []
+        adata = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
-        nuclei_patch_generator = PatchGenerator()
-        for sample in samples:
-            patches, df = nuclei_patch_generator.get_patches(
-                sample,
-                self.sdata.tables[self.table_key],
-                scale=True,
-                quantiles_low=self.model_config['quantiles_low'],
-                quantiles_high=self.model_config['quantiles_high'],
-                channels=self.sdata.images[self.image_key].coords.values,
+        if self.patch_generator is None:
+            if spatial_key_index is None:
+                spatial_key_index = self.spatial_key
+            self.patch_generator = PatchGenerator(
+                sdata=self.sdata,
+                sample_key=self.sample_key,
+                table_key=self.table_key,
+                image_key=self.image_key,
+                spatial_key=spatial_key_index,
+                scale=scale,
             )
-            df = df.reset_index()
-            if df.empty:
+        for sample in samples:
+            patches, df_patches = self.patch_generator.get_patches(sample)
+            if df_patches.empty:
                 continue
             if self.model_config['conditional']:
-                df_cond = df[['plate_id', 'z']]  # fix: dataset specific
-                # rename plate_id to dataset
-                df_cond = df_cond.rename(
-                    columns={'plate_id': 'dataset'}
-                )  # fix: dataset specific
-                # reset index
-                if filter_encodable_conditions:
-                    # filter out conditions which cannot be encoded
-                    idx = df_cond.index[
-                        (df_cond['z'].isin(self.oh_enc.categories_[1]))
-                        & (df_cond['dataset'].isin(self.oh_enc.categories_[0]))
-                    ]
-                    conditions = self.oh_enc.transform(
-                        df_cond.iloc[idx][self.oh_enc.feature_names_in_]
-                    )
-                    patches = patches[idx]
-                    df = df.iloc[idx]
-                else:
-                    conditions = self.oh_enc.transform(
-                        df_cond[self.oh_enc.feature_names_in_]
-                    )
+                conditions = self.model_oh_enc.transform(
+                    df_patches[self.model_oh_enc.feature_names_in_]
+                )
                 _, _, z = self.model.encoder.predict(
                     [patches, conditions], batch_size=batch_size
                 )
             else:
                 _, _, z = self.model.encoder.predict(patches, batch_size=batch_size)
-            df_z = pd.DataFrame(z, columns=[f'z_{i}' for i in range(z.shape[-1])])
-            # reset z to pixel coordinates
-            df['z'] = df['z'] / 0.322 * 10  # fix: dataset specific
 
-            # drop non numeric cols
-            df = df.drop(columns=['well_id', 'plate_id'])  # fix: dataset specific
-            # add df_z to df
-            df = pd.concat([df, df_z], axis=1)
-            df = df.groupby('label').mean()
-            df = df.reset_index()
-            df_z = df[[f'z_{i}' for i in range(z.shape[-1])]]
-            df = df.drop(columns=[f'z_{i}' for i in range(z.shape[-1])])
-
-            df = df.assign(well_id=sample)
-
-            df.index = (
-                df['label'].astype(str) + '_' + df['well_id'] + '_' + df['plate_id']
+            #  TODO: Should store results in sdata.tables instead of creating standalone AnnData -> sdata.parse table or add as obsm to existing table
+            adata.append(
+                ad.AnnData(
+                    X=z,
+                    obs=self.sdata.tables[self.table_key][df_patches.index].obs,
+                    var=pd.DataFrame(
+                        index=[f'phc_latent_{i + 1}' for i in range(z.shape[-1])]
+                    ),
+                )
             )
-            # TODO: Should store results in sdata.tables instead of creating standalone AnnData -> sdata.parse table or add as obsm to existing table
-            adata = ad.AnnData(
-                X=df_z.values,
-                obs=df,
-                var=pd.DataFrame(index=[f'z_{i + 1}' for i in range(df_z.shape[-1])]),
-            )
-            results.append(adata)
-        adata = ad.concat(results)
-        adata.obs['label'] = adata.obs.index.copy()
-        return adata
+        self.sdata.tables['phenocoder'] = ad.concat(adata)
 
     def spatialgraph_stats(self) -> None:
         """

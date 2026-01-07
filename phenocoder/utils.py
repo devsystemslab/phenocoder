@@ -20,7 +20,7 @@ def plot_latent_space(
     if n_samples == 0:
         n_samples = 1
     idx = np.random.choice(range(len(generator)), n_samples, replace=False)
-    if generator.return_conditions:
+    if generator.conditions is not None:
         data, conditions = zip(*[generator[i] for i in idx])
         data = np.concatenate(data, axis=0)
         conditions = np.concatenate(conditions, axis=0)
@@ -61,7 +61,7 @@ def plot_latent_space(
 def plot_reconstructions(
     model, generator, n_preview=200, batch_size=64, show=True, return_fig=False
 ):
-    if generator.return_conditions:
+    if generator.conditions is not None:
         data, conditions = zip(
             *[generator[i] for i in range((n_preview // batch_size) + 1)]
         )
@@ -112,6 +112,59 @@ def plot_to_image(figure):
     # Add the batch dimension
     image = tf.expand_dims(image, 0)
     return image
+
+
+def write_training_plots_to_tensorboard(
+    model,
+    data_generator_train,
+    model_oh_enc,
+    dir_tensorboard,
+    n_preview=300,
+    plot_frac=0.001,
+):
+    """
+    Write training visualization plots to TensorBoard.
+
+    Generates and writes reconstruction and latent space visualization plots
+    to TensorBoard for monitoring model training progress.
+
+    Args:
+        model: The trained model (CVAE or CondCVAE).
+        data_generator_train: Training data generator.
+        model_oh_enc: One-hot encoder for conditional models.
+        dir_tensorboard (Path or str): Directory for TensorBoard logs.
+        n_preview (int, optional): Number of samples for reconstruction plots. Defaults to 300.
+        plot_frac (float, optional): Fraction of data for latent space visualization. Defaults to 0.001.
+
+    Returns:
+        None
+    """
+    file_writer = tf.summary.create_file_writer(str(dir_tensorboard))
+
+    figure_reconstructions = plot_reconstructions(
+        model,
+        data_generator_train,
+        n_preview=n_preview,
+        return_fig=True,
+        show=False,
+    )
+    with file_writer.as_default():
+        tf.summary.image(
+            'input vs reconstruction',
+            plot_to_image(figure_reconstructions),
+            step=0,
+        )
+
+    figure_latent_space = plot_latent_space(
+        model,
+        data_generator_train,
+        model_oh_enc,
+        sample_frac=plot_frac,
+        return_fig=True,
+        show=False,
+    )
+    with file_writer.as_default():
+        tf.summary.image('latent space', plot_to_image(figure_latent_space), step=0)
 
 
 def scale_image(

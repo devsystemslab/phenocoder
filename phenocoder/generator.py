@@ -1,10 +1,10 @@
-import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from keras.utils import Sequence
 from sklearn.preprocessing import OneHotEncoder
+from spatialdata import SpatialData
 from tqdm import tqdm
 
 
@@ -18,14 +18,12 @@ class PatchGenerator:
 
     def __init__(
         self,
-        dataset: str,
-        sdata,
+        sdata: SpatialData,
         image_key: str,
         spatial_key: str,
         table_key: str,
         sample_key: str,
-        dir_output: str | Path,
-        max_workers: int = 12,
+        scale: bool,
     ):
         """
         Initialize DatasetGenerator.
@@ -52,6 +50,7 @@ class PatchGenerator:
         self.spatial_key = spatial_key
         self.table_key = table_key
         self.sample_key = sample_key
+        self.scale = scale
         image_key_init = '_'.join(
             [
                 self.image_key,
@@ -61,15 +60,10 @@ class PatchGenerator:
         self.channels = self.sdata.images[image_key_init].coords['c'].values.tolist()
         self.image_size = self.sdata.images[image_key_init].shape[-2:]
         self.patch_size = (128, 128)
-        self.max_workers = max_workers
-        self.dir_output = Path(dir_output)
-        self.dir_dataset = Path(dir_output, dataset)
-        self.df_images = None
         self.df_stats = pd.DataFrame()
-        self.df_stats_patches = pd.DataFrame()
-        self.df_stats_patches_sampled = None
         self.patches = None
-        self.ids = None
+        self.percentiles_low = None
+        self.percentiles_high = None
 
     def init_patches(self):
         """
@@ -111,11 +105,8 @@ class PatchGenerator:
 
     def extract_patch(
         self,
-        img,
-        id,
-        scale=False,
-        percentiles_high=None,
-        percentiles_low=None,
+        img: np.ndarray,
+        id: int,
     ):
         """
         Extract a patch from an image centered on specified coordinates.
@@ -145,14 +136,16 @@ class PatchGenerator:
         y_min = y - self.patch_size[1] // 2
         img = img[:, y_min:y_max, x_min:x_max]
         assert img.shape[-2:] == self.patch_size
-        if scale:
-            if percentiles_high is None or percentiles_low is None:
+        if self.scale:
+            if self.percentiles_high is None or self.percentiles_low is None:
                 raise ValueError('Percentiles need to be provided for scaling')
             img = img.astype(np.float32)
-            for i in range(img.shape[-1]):
-                img[..., i] = np.clip(
-                    (img[..., i] - percentiles_low[i])
-                    / (percentiles_high[i] - percentiles_low[i]),
+            for i in range(img.shape[0]):
+                if self.percentiles_high[i] == self.percentiles_low[i]:
+                    self.percentiles_high[i] += 1
+                img[i] = np.clip(
+                    (img[i] - self.percentiles_low[i])
+                    / (self.percentiles_high[i] - self.percentiles_low[i]),
                     0,
                     1,
                 )
@@ -160,7 +153,9 @@ class PatchGenerator:
 
         return img
 
-    def __get_image_stats__(self, imgs, id, id_name, percentile=1):
+    def __get_image_stats__(
+        self, imgs: np.ndarray, id: str, id_name: str, percentile: int = 1
+    ):
         """
         Calculate comprehensive statistics for image data.
 
@@ -168,7 +163,7 @@ class PatchGenerator:
         ----------
         imgs : ndarray
             Input image array
-        id : str or int
+        id : str
             Identifier for the image/patch
         id_name : str
             Name of the ID column
@@ -213,7 +208,7 @@ class PatchGenerator:
 
         return df
 
-    def generate_image_stats(self, sample_id):
+    def generate_image_stats(self, sample_id: str):
         """
         Generate statistics for all patches in a sample.
 
@@ -230,7 +225,29 @@ class PatchGenerator:
             df_stat = self.__get_image_stats__(imgs, sample_id, 'sample_id')
             self.df_stats = pd.concat([self.df_stats, df_stat])
 
-    def write_patches(self, sample_id):
+    def select_patches(self, sample_id: str):
+        """
+        Select all patches of a given sample.
+
+        Parameters
+        ----------
+        sample_id : str or int
+            Sample identifier for which to select patches
+
+        Returns
+        -------
+        df_patches_sample : pd.DataFrame
+            DataFrame containing patch information
+        img : np.ndarray
+            Image array
+        """
+        # get all files that need to be written
+        df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
+        img_key_sample = '_'.join([self.image_key, sample_id])
+        img = np.asarray(self.sdata.images[img_key_sample])
+        return df_patches_sample, img
+
+    def write_patches(self, sample_id: str):
         """
         Write all patches of a given samples to disk as numpy arrays.
 
@@ -239,18 +256,68 @@ class PatchGenerator:
         sample_id : str or int
             Sample identifier for which to write patches
         """
-
-        # get all files that need to be written
-        df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
-        img_key_sample = '_'.join([self.image_key, sample_id])
-        img = np.asarray(self.sdata.images[img_key_sample])
+        df_patches_sample, img = self.select_patches(sample_id)
         for id, file in zip(df_patches_sample['id'], df_patches_sample['file']):
             np.save(Path(self.dir_dataset, file), self.extract_patch(img, id))
 
+    def get_patches(self, sample_id: str):
+        """
+        Return all patches of a given sample.
+
+        Parameters
+        ----------
+        sample_id : str or int
+            Sample identifier for which to retrieve patches
+
+        Returns
+        -------
+        list of np.ndarray
+            List of patches as numpy arrays
+        pd.DataFrame
+            DataFrame containing patch information
+        """
+        df_patches_sample, img = self.select_patches(sample_id)
+        patches = np.asarray(
+            [self.extract_patch(img, id) for id in df_patches_sample['id']]
+        )
+        return np.moveaxis(patches, 1, -1), df_patches_sample
+
+    def get_scaling_percentiles(self):
+        """
+        Extract and set scaling percentiles from computed statistics.
+
+        Computes conservative percentiles across all samples and z-stacks for each channel
+        to use for normalization during patch extraction. Uses the minimum of percentile_low
+        values and maximum of percentile_high values to avoid clipping any samples.
+
+        Sets the percentiles_low and percentiles_high attributes based on the
+        percentile_low and percentile_high values in df_stats.
+
+        Raises
+        ------
+        ValueError
+            If statistics have not been computed yet (df_stats is None or empty)
+        """
+        if self.df_stats is None or self.df_stats.empty:
+            raise ValueError('Statistics not computed yet')
+
+        # Group by channel and compute conservative percentiles to avoid clipping
+        # Use min for low percentile (darkest values) and max for high percentile (brightest values)
+        self.percentiles_low = self.df_stats.groupby('channel')['percentile_low'].min()
+        self.percentiles_high = self.df_stats.groupby('channel')[
+            'percentile_high'
+        ].max()
+
+        # Set percentiles in the same order as self.channels
+        self.percentiles_low = self.percentiles_low.loc[self.channels].values
+        self.percentiles_high = self.percentiles_high.loc[self.channels].values
+
     def generate_dataset(
         self,
-        n_samples=None,
-        n_patches=None,
+        dataset: str,
+        dir_output: str,
+        n_samples: int = None,
+        n_patches: int = None,
     ):
         """
         Generate complete dataset with patches and statistics.
@@ -262,6 +329,8 @@ class PatchGenerator:
         n_patches : int, optional
             Number of patches to sample from all available patches
         """
+        self.dir_output = Path(dir_output)
+        self.dir_dataset = Path(dir_output, dataset)
         self.dir_output.mkdir(exist_ok=True, parents=True)
         self.dir_dataset.mkdir(exist_ok=True, parents=True)
         self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
@@ -273,6 +342,8 @@ class PatchGenerator:
             for sample in tqdm(self.samples, desc='Generating image statistics')
         ]
         self.df_stats.to_csv(Path(self.dir_dataset, 'stats.csv'), index=False)
+        if self.scale:
+            self.get_scaling_percentiles()
         if n_patches is not None:
             self.patches = self.patches.sample(n_patches, replace=False)
             self.samples = self.patches[self.sample_key].unique()
@@ -280,13 +351,14 @@ class PatchGenerator:
             lambda row: f'{row[self.sample_key]}_{row["id"]}.npy',
             axis=1,
         )
+        self.patches['dataset'] = dataset
         self.patches.to_csv(Path(self.dir_dataset, 'patches.csv'))
         [self.write_patches(id) for id in tqdm(self.samples, desc='Writing patches')]
 
 
 class SequenceGenerator(Sequence):
     """
-    Keras Sequence generator for loading image patches during training.
+    Keras Sequence generator for loading image patches from disk during training.
 
     This generator loads patches from disk and applies optional data
     augmentation and normalization for training deep learning models.
@@ -294,25 +366,22 @@ class SequenceGenerator(Sequence):
 
     def __init__(
         self,
-        list_ids: list,
+        ids: list,
         batch_size=32,
         dim=(128, 128),
         n_channels=4,
         shuffle=True,
-        scale=False,
         flip=False,
-        percentiles_low=None,
-        percentiles_high=None,
         conditions=None,
         return_conditions=False,
         **kwargs,
     ):
         """
-        Initialize PatchGenerator.
+        Initialize SequenceGenerator.
 
         Parameters
         ----------
-        list_ids : list
+        ids : list
             List of file paths for patches to load
         batch_size : int, default 32
             Number of patches per batch
@@ -341,15 +410,11 @@ class SequenceGenerator(Sequence):
         self.indexes = None
         self.dim = dim
         self.batch_size = batch_size
-        self.list_ids = list_ids
+        self.ids = ids
         self.n_channels = n_channels
         self.shuffle = shuffle
         self.flip = flip
-        self.scale = scale
-        self.percentiles_low = percentiles_low
-        self.percentiles_high = percentiles_high
         self.conditions = conditions
-        self.return_conditions = return_conditions
         self.on_epoch_end()
 
     def __len__(self):
@@ -361,7 +426,7 @@ class SequenceGenerator(Sequence):
         int
             Number of batches that fit in the dataset
         """
-        return int(np.floor(len(self.list_ids) / self.batch_size))
+        return int(np.floor(len(self.ids) / self.batch_size))
 
     def __getitem__(self, index):
         """
@@ -378,20 +443,8 @@ class SequenceGenerator(Sequence):
             Batch of patches, optionally with conditions
         """
         indexes = self.indexes[index * self.batch_size : (index + 1) * self.batch_size]
-        list_ids_temp = [self.list_ids[k] for k in indexes]
-        X = self.__data_generation(list_ids_temp)
-
-        if self.scale:
-            for i in range(X.shape[-1]):
-                if self.percentiles_high[i] == self.percentiles_low[i]:
-                    self.percentiles_high[i] += 1
-                X[..., i] = np.clip(
-                    (X[..., i] - self.percentiles_low[i])
-                    / (self.percentiles_high[i] - self.percentiles_low[i]),
-                    0,
-                    1,
-                )
-            X = X.astype(np.float32)
+        ids_temp = [self.ids[k] for k in indexes]
+        X = self.__data_generation(ids_temp)
 
         if self.flip:
             for i in range(X.shape[0]):
@@ -402,7 +455,7 @@ class SequenceGenerator(Sequence):
                 if np.random.rand() < 0.5:
                     X[i,] = np.flipud(X[i,])
 
-        if self.return_conditions and self.conditions is not None:
+        if self.conditions is not None:
             cond = self.conditions[indexes]
             return X, cond
         else:
@@ -414,11 +467,11 @@ class SequenceGenerator(Sequence):
 
         Shuffles the order of patches if shuffle is enabled.
         """
-        self.indexes = np.arange(len(self.list_ids))
+        self.indexes = np.arange(len(self.ids))
         if self.shuffle:
             np.random.shuffle(self.indexes)
 
-    def __data_generation(self, list_ids_temp):
+    def __data_generation(self, ids_temp):
         """
         Generate batch data by loading patches from disk.
 
@@ -435,7 +488,7 @@ class SequenceGenerator(Sequence):
         # Initialization
         X = np.empty((self.batch_size, *self.dim, self.n_channels))
         # Generate data
-        for i, idx in enumerate(list_ids_temp):
+        for i, idx in enumerate(ids_temp):
             # Store sample
             X[i,] = np.moveaxis(np.load(idx), 0, -1)
 
@@ -478,44 +531,15 @@ class DatasetLoader:
         self.patches = []
         for dataset in self.datasets:
             self.stats.append(
-                pd.read_csv(Path(self.dir_datasets, dataset, 'stats.csv')).assign(
-                    dataset=dataset
-                )
+                pd.read_csv(Path(self.dir_datasets, dataset, 'stats.csv'))
             )
             self.patches.append(
-                pd.read_csv(Path(self.dir_datasets, dataset, 'patches.csv')).assign(
-                    dataset=dataset
-                )
+                pd.read_csv(Path(self.dir_datasets, dataset, 'patches.csv'))
             )
         self.stats = pd.concat(self.stats)
         self.patches = pd.concat(self.patches)
 
-    def get_scaling_stats(self):
-        """
-        Get scaling statistics across all datasets.
-
-        Returns
-        -------
-        tuple
-            Tuple of (percentiles_low, percentiles_high) for each channel,
-            representing the global min/max quantiles for normalization
-        """
-        percentiles_low = self.stats.groupby('channel')['percentile_low'].min()
-        percentiles_high = self.stats.groupby('channel')['percentile_high'].max()
-        return percentiles_low, percentiles_high
-
-    def setup_generators(
-        self,
-        datasets,
-        dir_datasets,
-        conditional=False,
-        batch_size=64,
-        dim=(128, 128),
-        n_channels=4,
-        shuffle=True,
-        scale=True,
-        n_workers=1,
-    ):
+    def set_train_val_split(self, batch_size=64, split: float = 0.8):
         """
         Setup generators for training and validation.
 
@@ -533,8 +557,6 @@ class DatasetLoader:
             Number of channels
         shuffle : bool, default True
             Whether to shuffle data
-        scale : bool, default True
-            Whether to scale data using quantiles
         n_workers : int, default 1
             Number of workers for data generation
 
@@ -544,72 +566,82 @@ class DatasetLoader:
             Training generator, validation generator, dataframe, and encoder
         """
         self.load_datasets()
-        percentiles_low, percentiles_high = self.get_scaling_stats()
-        # randomize
         self.patches = self.patches.sample(frac=1, random_state=42, replace=False)
-        # get well dataset combinations and split into train and val
         df_samples = self.patches.groupby([self.sample_key, 'dataset']).count()
         df_samples = df_samples.reset_index().sample(
             frac=1, random_state=42, replace=False
         )
-        # train val split
-        n_train = int(df_samples.shape[0] * 0.8)
+        n_train = int(df_samples.shape[0] * split)
         df_samples['split'] = [
             'train' if i < n_train else 'val' for i in range(df_samples.shape[0])
         ]
-        # TODO: add stratify by sample key!
-        # merge df with df_well_train
         self.patches = pd.merge(
             self.patches,
             df_samples[[self.sample_key, 'dataset', 'split']],
             on=[self.sample_key, 'dataset'],
             how='left',
         )
-        # drop remainders of split columns regarding batch_size grouped by split
+        # drop remainders of splits regarding batch_size
         self.patches = (
             self.patches.groupby('split')
             .apply(lambda x: x.iloc[: -(x.shape[0] % batch_size)])
             .reset_index(drop=True)
         )
-        # expand files to complete paths and add to path in self.patches -> Path(self.dir_datasets, self.patches['dataset'], file)
+        # expand files to complete paths
         self.patches['file_path'] = self.patches.apply(
             lambda x: Path(self.dir_datasets, x['dataset'], x['file']), axis=1
         )
 
-        if conditional:
-            # one hot encode conditions with sklearn
+    def get_generators(
+        self,
+        conditions: list[str],
+        batch_size: int = 64,
+        dim=(128, 128),
+        n_channels=4,
+        shuffle=True,
+        n_workers=1,
+    ):
+        if conditions:
             enc = OneHotEncoder()
-            cond = enc.fit_transform(self.patches[['dataset', 'z']]).toarray()
-            # convert conditions to numpy array
-            cond_train = cond[self.patches['split'] == 'train']
-            cond_val = cond[self.patches['split'] == 'val']
-        # TODO: fix that the SequenceGenerator just works for the CondVAE...
-        generator_train = SequenceGenerator(
-            self.patches[self.patches['split'] == 'train']['file_path'].values,
-            conditions=cond_train,
-            batch_size=batch_size,
-            dim=dim,
-            n_channels=n_channels,
-            shuffle=shuffle,
-            scale=scale,
-            percentiles_low=percentiles_low.values,
-            percentiles_high=percentiles_high.values,
-            return_conditions=conditional,
-            workers=n_workers,
-        )
-
-        generator_val = SequenceGenerator(
-            self.patches[self.patches['split'] == 'val']['file_path'].values,
-            conditions=cond_val,
-            batch_size=batch_size,
-            dim=dim,
-            n_channels=n_channels,
-            shuffle=shuffle,
-            scale=scale,
-            percentiles_low=percentiles_low.values,
-            percentiles_high=percentiles_high.values,
-            return_conditions=conditional,
-            workers=n_workers,
-        )
-
-        return generator_train, generator_val, self.patches, enc
+            cond = enc.fit_transform(self.patches[conditions]).toarray()
+            generator_train = SequenceGenerator(
+                self.patches[self.patches['split'] == 'train']['file_path'].values,
+                conditions=cond[self.patches['split'] == 'train'],
+                batch_size=batch_size,
+                dim=dim,
+                n_channels=n_channels,
+                shuffle=shuffle,
+                return_conditions=True,
+                workers=n_workers,
+            )
+            generator_val = SequenceGenerator(
+                self.patches[self.patches['split'] == 'val']['file_path'].values,
+                conditions=cond[self.patches['split'] == 'val'],
+                batch_size=batch_size,
+                dim=dim,
+                n_channels=n_channels,
+                shuffle=shuffle,
+                return_conditions=True,
+                workers=n_workers,
+            )
+            return generator_train, generator_val, enc
+        else:
+            generator_train = SequenceGenerator(
+                self.patches[self.patches['split'] == 'train']['file_path'].values,
+                batch_size=batch_size,
+                dim=dim,
+                n_channels=n_channels,
+                shuffle=shuffle,
+                return_conditions=False,
+                workers=n_workers,
+            )
+            generator_val = SequenceGenerator(
+                self.patches[self.patches['split'] == 'val']['file_path'].values,
+                batch_size=batch_size,
+                dim=dim,
+                n_channels=n_channels,
+                shuffle=shuffle,
+                return_conditions=False,
+                workers=n_workers,
+            )
+            return generator_train, generator_val
