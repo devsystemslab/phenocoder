@@ -1,16 +1,19 @@
-from phenocoder.train import train_model
+import shutil
+
+from tests.conftest import example_3d
 
 
 def test_train():
-    train_model(
-        dir_dataset='/pstore/data/ihb-g-deco/USERS/schulzp9/tumoroid/test_all_plates',
-        conditional=True,
-        n_latent_dim=128,
-        n_dense_dim=256,
-        n_epochs=10,
-        dropout=0.5,
-        beta=0.01,
-        n_workers=8,
-        batch_size=64,
-        input_shape=(128, 128, 1),
+    pheno = example_3d()
+    pheno.generate_dataset(
+        dataset='test_dataset',
+        dir_dataset='tests/data/tmp',
+        spatial_key_index='spatial_index',
     )
+    pheno.initialize_model(n_latent_dim=32, n_dense_dim=64, conditions=['dataset', 'z'])
+    pheno.train(n_epochs=3)
+    shutil.rmtree('tests/data/tmp')
+
+
+if __name__ == '__main__':
+    test_train()

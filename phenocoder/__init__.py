@@ -1,3 +1,3 @@
-from ._phenocoder import Phenocoder
+from .phenocoder import Phenocoder
 
 __all__ = ['Phenocoder']

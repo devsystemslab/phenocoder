@@ -1,69 +1,184 @@
-from spatialdata.models import Image2DModel, Image3DModel
-import pytest
-from pathlib import Path
-import pandas as pd
 import os
-from skimage import io
+from pathlib import Path
+
+import anndata as ad
 import numpy as np
+import pandas as pd
+import pytest
+import spatialdata as sd
+from skimage import io, measure
+
+import phenocoder as phc
 
 
-@pytest.fixture
-def get_metadata(dir_images: str, regex: str = None) -> pd.DataFrame:
-    """
-    Get metadata from image filenames
-    :param dir_images:
-    :param regex: regex pattern to match metadata in filename, defaults to Yokogawa naming convention.
-    :return:
-    """
-    images = os.listdir(dir_images)
-    images = [image for image in images if '.tif' in image]
-    if regex is None:
-        regex = r'_(?P<well_id>[A-Z]\d{2})_T(?P<time_point>\d{4})F(?P<field_id>\d{3})L(?P<time_line_id>\d{2,3})A(?P<action_id>\d{2})Z(?P<z_stack_id>\d{2})C(?P<channel_id>\d{2})\.tif$'
-    df = pd.DataFrame({'file': images, 'dir_images': str(dir_images)})
-    df = df.join(df['file'].str.extractall(regex).groupby(level=0).last())
-    # remove rows that have nan in any column
-    df = df[~df.isna().any(axis=1)]
-    return df
+def example_2d():
+    dir_images = 'tests/data/2d/imgs'
+    img_files = sorted(os.listdir(dir_images))
+    imgs = np.asarray([io.imread(Path(dir_images, file)) for file in img_files])
+    img_label = io.imread(Path('tests/data/2d', 'labels.tif'))
+    img_mask = io.imread(Path('tests/data/2d', 'mask.tif'))
 
-
-@pytest.fixture(scope='module')
-def example_imgs():
-    """Factory that creates image arrays based on dimensions"""
-
-    def _load_images(dims: str = '2d'):
-        if dims == '2d':
-            dir_images = Path(__file__).parent / 'data' / '2d' / 'imgs'
-        elif dims == '3d':
-            dir_images = Path(__file__).parent / 'data' / '3d' / 'imgs'
-        else:
-            raise ValueError('dims must be "2d" or "3d".')
-
-        imgs = np.asarray(
-            [
-                io.imread(Path(dir_images, file))
-                for file in sorted(os.listdir(dir_images))
-            ]
+    df_features = pd.DataFrame(
+        measure.regionprops_table(
+            label_image=img_label,
+            intensity_image=np.moveaxis(imgs, 0, -1),
+            properties=(
+                'label',
+                'centroid',
+                'area',
+                'eccentricity',
+                'intensity_mean',
+                'major_axis_length',
+                'minor_axis_length',
+            ),
         )
-        return imgs
+    ).set_index('label')
 
-    return _load_images
+    features_obs = [
+        'area',
+        'eccentricity',
+        'major_axis_length',
+        'minor_axis_length',
+        'centroid-0',
+        'centroid-1',
+    ]
+
+    features_X = [col for col in df_features.columns if col not in features_obs]
+    adata = ad.AnnData(X=df_features[features_X], obs=df_features[features_obs])
+
+    sdata = sd.SpatialData(
+        images={'IF': sd.models.Image2DModel.parse(imgs, c_coords=img_files)},
+        labels={
+            'nuclei': sd.models.Labels2DModel.parse(img_label),
+            'mask': sd.models.Labels2DModel.parse(img_mask),
+        },
+        tables={'nuclei_features': sd.models.TableModel.parse(adata)},
+    )
+    # Add add label shapes
+    sdata.shapes['nuclei_shapes'] = sd.to_polygons(sdata.labels['nuclei'])
+
+    # write sdata to tests/data/2d
+    sdata.write(Path('tests/data/2d', 'sdata'), overwrite=True)
+
+    # setup phenocoder
+    pheno = phc.Phenocoder()
+    pheno.add_sdata(sdata)
+
+    return pheno
 
 
 @pytest.fixture
-def sample_data_2d(example_imgs):
-    """
-    Generate example 2d data from tiff files.
-    """
-    imgs = Image2DModel()
-    imgs = imgs.parse(example_imgs('2d'), dims=['c', 'y', 'x'])
-    return imgs
+def phenocoder_2d():
+    pheno = example_2d()
+    return pheno
+
+
+def example_3d():
+    dir_tables = 'tests/data/3d/tables'
+    table_files = sorted(os.listdir(dir_tables))
+    df = pd.concat([pd.read_csv(Path(dir_tables, file)) for file in table_files])
+    z_step = 10
+    pixel_size = 0.322
+    df['centroid-0'] = df['centroid-0'] / 4
+    df['centroid-1'] = df['centroid-1'] / 4
+    df['z_init'] = df['z_stack'] - 1
+    df['z_stack'] = df['z_stack'] / pixel_size * z_step
+    df = df.groupby(['label', 'well']).mean()
+    df = df.reset_index()
+
+    features_obs = [
+        'area',
+        'eccentricity',
+        'major_axis_length',
+        'minor_axis_length',
+        'centroid-0',
+        'centroid-1',
+        'z_stack',
+        'z_init',
+        'well',
+    ]
+
+    features_X = [col for col in df.columns if col not in features_obs]
+    adata = ad.AnnData(X=df[features_X], obs=df[features_obs])
+
+    # Add spatial coordinates to adata.obsm
+    adata.obsm['spatial'] = adata.obs[['centroid-1', 'centroid-0', 'z_stack']].values
+    adata.obsm['spatial_index'] = adata.obs[
+        ['centroid-1', 'centroid-0', 'z_init']
+    ].values.astype(int)
+    spatial_coords_2d = adata.obs[['centroid-1', 'centroid-0']].values
+    adata.obsm['spatial_2d'] = spatial_coords_2d
+    adata.obs['instance_id'] = adata.obs.index.astype(int)
+    adata.obs['region'] = 'nuclei'
+
+    dir_images = 'tests/data/3d/imgs'
+    img_files = sorted(os.listdir(dir_images))
+    channels = [f'C0{i + 1}' for i in range(4)]
+    wells = adata.obs['well'].unique()
+
+    images_dict = {}
+    labels_dict = {}
+
+    # build per-well image and label entries
+    for well in wells:
+        # select image files belonging to this well
+        files_well = [f for f in img_files if f'_{well}_' in f]
+
+        imgs = []
+        for channel in channels:
+            files_channel = [
+                file for file in files_well if file.endswith(f'{channel}.png')
+            ]
+            imgs.append(
+                np.asarray(
+                    [io.imread(Path(dir_images, file)) for file in files_channel]
+                )
+            )
+        imgs = np.asarray(imgs)
+
+        # select label files for this well
+        dir_labels = 'tests/data/3d/labels'
+        img_label_files = sorted(os.listdir(dir_labels))
+        img_label_files_well = [f for f in img_label_files if f'_{well}_' in f]
+        imgs_label = np.asarray(
+            [io.imread(Path(dir_labels, file)) for file in img_label_files_well]
+        )
+
+        images_dict[f'IF_{well}'] = sd.models.Image3DModel.parse(
+            imgs, c_coords=channels
+        )
+        images_dict[f'IF_MIP_{well}'] = sd.models.Image2DModel.parse(
+            imgs.max(axis=1), c_coords=channels
+        )
+        labels_dict[f'nuclei_{well}'] = sd.models.Labels3DModel.parse(imgs_label)
+
+    sdata = sd.SpatialData(
+        images=images_dict,
+        labels=labels_dict,
+        tables={
+            'nuclei_features': sd.models.TableModel.parse(
+                adata,
+                region='nuclei',
+                region_key='region',
+                instance_key='instance_id',
+                overwrite_metadata=True,
+            )
+        },
+    )
+
+    # setup phenocoder
+    pheno = phc.Phenocoder(
+        table_key='nuclei_features',
+        sample_key='well',
+        image_key='IF',
+        labels_key='nuclei',
+    )
+    pheno.add_sdata(sdata)
+
+    return pheno
 
 
 @pytest.fixture
-def sample_data_3d(example_imgs):
-    """
-    Generate example 3d data from tiff files.
-    """
-    imgs = Image3DModel()
-    imgs = imgs.parse(example_imgs('3d'), dims=['c', 'z', 'y', 'x'])
-    return imgs
+def phenocoder_3d():
+    pheno = example_3d()
+    return pheno

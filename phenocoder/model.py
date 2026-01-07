@@ -1,15 +1,13 @@
 import os
 
 os.environ['KERAS_BACKEND'] = 'tensorflow'
-import tensorflow as tf
 import keras
-from keras import ops
-from keras import layers
+import tensorflow as tf
+from keras import layers, ops
 from keras.models import Model
 
+
 # TODO: add 3D versions...
-
-
 @keras.saving.register_keras_serializable(package='custom_layers')
 class Sampling(layers.Layer):
     def __init__(self, **kwargs):

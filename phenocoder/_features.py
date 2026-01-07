@@ -7,6 +7,9 @@ import anndata as ad
 import pandas as pd
 import scanpy as sc
 
+# TODO: Add spatialdata import and refactor module to work with sdata instead of AnnData/MuData
+# TODO: Store results in sdata.tables instead of returning standalone AnnData/MuData objects
+
 
 def add_morphology(adata: ad.AnnData) -> ad.AnnData:
     """
@@ -14,6 +17,7 @@ def add_morphology(adata: ad.AnnData) -> ad.AnnData:
     :param adata:
     :return:
     """
+    # TODO: Refactor to work with sdata tables instead of extracting from adata.obs to numpy
     # extend with morphology features
     adata_morph = ad.AnnData(
         np.concatenate(
@@ -55,6 +59,8 @@ def process_features(
     :param registered:
     :return:
     """
+    # TODO: Refactor to accept sdata parameter instead of pandas DataFrame
+    # TODO: Return sdata-integrated result instead of standalone AnnData
     if type is None:
         raise ValueError('feature_type must be either "nuclei" or "neighbors"')
     adata = ad.AnnData(df.filter(regex=f'_{feature_type}'))
@@ -102,6 +108,10 @@ def run_feature_processing(
     :param cycle:
     :param channels:
     """
+    # TODO: Refactor to accept sdata instead of file-based parameters (dir_screen, plates, cycle)
+    # TODO: Replace hard-coded file paths with sdata.tables access
+    # TODO: Return sdata-integrated result instead of MuData
+    # TODO: encode_nuclei_patches() call returns AnnData - should return sdata-integrated result
     adata_pheno = []
     for plate in plates:
         file = Path(
@@ -166,6 +176,7 @@ def run_feature_processing(
     adata_pheno.obs = adata_pheno.obs[features_keep]
     adata_nuc.obs = adata_nuc.obs[features_keep]
     adata_msg.obs = adata_msg.obs[features_keep]
+    # TODO: Replace MuData structure with sdata.tables storage
     mdata = mu.MuData(
         {'nuclei': adata_nuc, 'nuclei_msg': adata_msg, 'phenocoder': adata_pheno}
     )
