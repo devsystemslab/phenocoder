@@ -475,7 +475,6 @@ class Phenocoder:
             else:
                 _, _, z = self.model.encoder.predict(patches, batch_size=batch_size)
 
-            #  TODO: Should store results in sdata.tables instead of creating standalone AnnData -> sdata.parse table or add as obsm to existing table
             adata.append(
                 ad.AnnData(
                     X=z,
