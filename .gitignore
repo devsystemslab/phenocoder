@@ -1,6 +1,7 @@
 .idea/
 .zed/
 .venv/
+.zed/
 .ropeproject/
 .pytest_cache/
 uv.lock
