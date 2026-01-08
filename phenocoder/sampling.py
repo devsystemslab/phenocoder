@@ -1,7 +1,6 @@
 import anndata as ad
 import numpy as np
 import pandas as pd
-from IPython import embed
 
 
 class SpatialSubunitSampler:
@@ -42,7 +41,7 @@ class SpatialSubunitSampler:
         n_subunits = np.ceil(extent / self.dim_subunit).astype(int)
 
         if self.verbose:
-            print(f'Organoid extent: {extent}')
+            print(f'Sample extent: {extent}')
             print(f'Grid dimensions: {n_subunits} subunits')
             print(f'Total potential subunits: {np.prod(n_subunits)}')
 

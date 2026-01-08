@@ -459,12 +459,12 @@ class SpatialGraphAnalyzer:
                 if self.results[radius][result].empty:
                     continue
                 self.results[radius][result].columns = [
-                    f'radius:{radius}_' + col
+                    f'radius:{radius}_' + f'stat:{result}_' + col
                     for col in self.results[radius][result].columns
                 ]
-                df.append(self.results[radius][result].reset_index())
-        self.tmp = df.copy()
+                df.append(self.results[radius][result].reset_index(drop=True))
         df = pd.concat(df, axis=1)
+        df.index = [self.index]
         return df
 
     def run(self) -> None:
