@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 import anndata as ad
+import bbknn
 import joblib
 import keras
 import numpy as np
@@ -131,8 +132,8 @@ class Phenocoder:
         Args:
             dataset (str): Name/identifier for the dataset being generated.
             dir_dataset (str | Path): Directory path for storing the generated dataset.
-            spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array. If None, uses
-                the instance's spatial_key attribute. Defaults to None.
+            spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
+            If None, uses the instance's spatial_key attribute. Defaults to None.
             scale (bool, optional): Whether to scale the image patches. Defaults to True.
 
         Returns:
@@ -626,11 +627,15 @@ class Phenocoder:
                     sampler.sample(max_obs=max_obs_per_subunit)
 
                 if len(sampler.subunits) == 0:
-                    print(f'Warning: Sample {sample} has no valid subunits after filtering, skipping.')
+                    print(
+                        f'Warning: Sample {sample} has no valid subunits after filtering, skipping.'
+                    )
                     continue
 
                 if verbose:
-                    print(f'Sample {sample}: {len(sampler.subunits)} subunits after filtering')
+                    print(
+                        f'Sample {sample}: {len(sampler.subunits)} subunits after filtering'
+                    )
 
                 # Process each subunit
                 for subunit_key, subunit_data in sampler.subunits.items():
@@ -690,7 +695,12 @@ class Phenocoder:
             df_stats = df_stats.reset_index(drop=True)
 
             # Separate metadata from stats
-            metadata_cols = [self.sample_key, 'subunit_id', 'subunit_key', 'subunit_n_obs']
+            metadata_cols = [
+                self.sample_key,
+                'subunit_id',
+                'subunit_key',
+                'subunit_n_obs',
+            ]
             stat_cols = [col for col in df_stats.columns if col not in metadata_cols]
 
             self.adata = ad.AnnData(
@@ -699,11 +709,8 @@ class Phenocoder:
                 var=pd.DataFrame(index=stat_cols),
             )
 
-            print(f'Spatial graph statistics computed for {len(results)} subunits across {len(samples)} samples.')
-            print(f'Results stored in self.adata with shape {self.adata.shape}')
-
         else:
-            # Original sample-level analysis
+            # sample-level analysis
             for sample in samples:
                 # Subset data for this sample
                 adata_sample = adata[adata.obs[self.sample_key] == sample].copy()
@@ -734,11 +741,15 @@ class Phenocoder:
                     df_sample = sga.to_df()
                     results.append(df_sample)
                 except Exception as e:
-                    print(f'Warning: Failed to compute stats for sample {sample}: {str(e)}')
+                    print(
+                        f'Warning: Failed to compute stats for sample {sample}: {str(e)}'
+                    )
                     continue
 
             if len(results) == 0:
-                print('Warning: No spatial statistics computed for any samples.')
+                raise ValueError(
+                    'Warning: No spatial statistics computed for any samples.'
+                )
                 return
 
             df_stats = pd.concat(results, axis=0, join='outer')
@@ -751,9 +762,6 @@ class Phenocoder:
                 obs=pd.DataFrame(index=df_stats.index),
                 var=pd.DataFrame(index=df_stats.columns),
             )
-
-            print(f'Spatial graph statistics computed for {len(results)} samples.')
-            print(f'Results stored in self.adata with shape {self.adata.shape}')
 
     def spatialgraph_embedding(
         self,
@@ -811,7 +819,6 @@ class Phenocoder:
             ...     n_neighbors=20
             ... )
         """
-        import bbknn
 
         if self.adata is None:
             raise ValueError(
@@ -915,7 +922,6 @@ class Phenocoder:
             use_highly_variable=variable_features,
         )
 
-        # Compute neighbors with or without batch correction
         if batch_correction:
             bbknn.bbknn(
                 self.adata, batch_key=batch_key, neighbors_within_batch=n_neighbors
@@ -923,6 +929,5 @@ class Phenocoder:
         else:
             sc.pp.neighbors(self.adata, n_neighbors=n_neighbors, use_rep='X_pca')
 
-        # Compute UMAP if requested
         if umap:
             sc.tl.umap(self.adata, n_components=2)
