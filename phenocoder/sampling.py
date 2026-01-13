@@ -1,7 +1,6 @@
 import anndata as ad
 import numpy as np
 import pandas as pd
-from IPython import embed
 
 
 class SpatialSubunitSampler:
@@ -42,7 +41,7 @@ class SpatialSubunitSampler:
         n_subunits = np.ceil(extent / self.dim_subunit).astype(int)
 
         if self.verbose:
-            print(f'Organoid extent: {extent}')
+            print(f'Sample extent: {extent}')
             print(f'Grid dimensions: {n_subunits} subunits')
             print(f'Total potential subunits: {np.prod(n_subunits)}')
 
@@ -102,15 +101,20 @@ class SpatialSubunitSampler:
 
     def sample(self, max_obs: int):
         """
-        Sample observations within each subunit based on max_obs threshold
+        Sample observations within each subunit based on max_obs threshold.
 
-        Uses the method specified in self.sample_method:
-        - 'random': Random subsampling
-        - 'fps': Farthest Point Sampling
-        - 'uniform': Uniform voxel-based sampling
+        Randomly subsamples observations in subunits that exceed the max_obs threshold.
+        Subunits with fewer observations than max_obs are left unchanged.
 
-        Returns:
-            None
+        Parameters
+        ----------
+        max_obs : int
+            Maximum number of observations per subunit. Subunits exceeding this
+            threshold will be randomly subsampled to this size.
+
+        Returns
+        -------
+        None
         """
         self.max_obs = max_obs
         if self.max_obs is None:

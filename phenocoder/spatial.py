@@ -9,8 +9,37 @@ from sklearn.neighbors import radius_neighbors_graph
 
 class SpatialGraphAnalyzer:
     """
-    Class for analyzing spatial graphs.
+    Analyzer for computing spatial graph statistics on spatial omics data.
 
+    This class provides comprehensive analysis of spatial relationships between cells
+    and cell clusters in spatial transcriptomics or imaging data. It constructs spatial
+    neighborhood graphs at multiple radii and computes various statistics including
+    interaction matrices, spatial autocorrelation, centrality scores, connectivity metrics,
+    and convex hull properties.
+
+    Typical workflow:
+        1. Initialize with AnnData object and analysis parameters
+        2. Call run() to compute all statistics across all specified radii
+        3. Call to_df() to get results as a single DataFrame
+
+    Attributes:
+        adata (ad.AnnData): Annotated data object with spatial coordinates and cluster labels.
+        cluster_key (str): Key in adata.obs containing cluster assignments.
+        spatial_key (str): Key in adata.obsm containing spatial coordinates.
+        radii (tuple[int]): Tuple of radii (in spatial units) for neighborhood calculations.
+        index (str): Identifier for this sample/analysis (used as DataFrame index).
+        results (dict): Computed statistics, populated after run() is called.
+
+    Example:
+        >>> analyzer = SpatialGraphAnalyzer(
+        ...     adata=adata_sample,
+        ...     cluster_key='leiden',
+        ...     spatial_key='spatial',
+        ...     radii=(25, 50, 100),
+        ...     index='sample_001'
+        ... )
+        >>> analyzer.run()
+        >>> df_stats = analyzer.to_df()
     """
 
     def __init__(
@@ -303,11 +332,16 @@ class SpatialGraphAnalyzer:
 
     def get_centrality(self) -> pd.DataFrame:
         """
-        Get centrality
-        :param adata:
-        :param well:
-        :param plate:
-        :return:
+        Calculate centrality scores between clusters.
+
+        Computes pairwise centrality scores that measure how central each cluster
+        is relative to other clusters in the spatial graph.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame containing centrality scores for each cluster pair, with one row
+            indexed by self.index and columns named 'centrality_{from}_{to}'.
         """
         # centrality scores
         sq.gr.centrality_scores(
@@ -333,7 +367,19 @@ class SpatialGraphAnalyzer:
 
     def get_connectivity(self) -> pd.DataFrame:
         """
-        Get connectivity
+        Calculate connectivity statistics (degree) for the spatial graph.
+
+        Computes the mean and standard deviation of node degrees (number of neighbors)
+        both globally and per cluster.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with one row indexed by self.index containing:
+            - 'mean': Mean degree across all nodes
+            - 'std': Standard deviation of degree across all nodes
+            - 'mean_degree_{cluster}': Mean degree for each cluster
+            - 'std_degree_{cluster}': Standard deviation of degree for each cluster
         """
         # get mean connectivity
         degrees = self.adata.obsp['spatial_connectivities'].sum(axis=0)
@@ -380,7 +426,20 @@ class SpatialGraphAnalyzer:
         df_degree = pd.concat([df_degree, df_degree_cluster], axis=1)
         return df_degree
 
-    def get_counts(self):
+    def get_counts(self) -> pd.DataFrame:
+        """
+        Calculate cell counts per cluster.
+
+        Computes the number of cells in each cluster and the total number of cells.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with one row indexed by self.index containing:
+            - 'cluster': Cluster label
+            - 'count': Number of cells in the cluster
+            - 'total': Total number of cells across all clusters
+        """
         df_counts = (
             self.adata.obs.groupby(self.cluster_key)
             .size()
@@ -459,12 +518,12 @@ class SpatialGraphAnalyzer:
                 if self.results[radius][result].empty:
                     continue
                 self.results[radius][result].columns = [
-                    f'radius:{radius}_' + col
+                    f'radius:{radius}_' + f'stat:{result}_' + col
                     for col in self.results[radius][result].columns
                 ]
-                df.append(self.results[radius][result].reset_index())
-        self.tmp = df.copy()
+                df.append(self.results[radius][result].reset_index(drop=True))
         df = pd.concat(df, axis=1)
+        df.index = [self.index]
         return df
 
     def run(self) -> None:
