@@ -10,6 +10,17 @@ from keras.models import Model
 # TODO: add 3D versions...
 @keras.saving.register_keras_serializable(package='custom_layers')
 class Sampling(layers.Layer):
+    """
+    Custom Keras layer implementing the reparameterization trick for VAE sampling.
+
+    This layer samples from the latent space distribution using the reparameterization
+    trick: z = mean + exp(0.5 * log_var) * epsilon, where epsilon ~ N(0, 1).
+    This allows backpropagation through the sampling operation during training.
+
+    Attributes:
+        seed_generator: Keras random seed generator for reproducible sampling.
+    """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.seed_generator = keras.random.SeedGenerator(42)
@@ -27,6 +38,46 @@ class Sampling(layers.Layer):
 
 
 class CVAE(Model):
+    """
+    Convolutional Variational Autoencoder (CVAE) for image data.
+
+    A VAE implementation using convolutional layers for encoding and decoding.
+    The model learns a compressed latent representation of input images and can
+    reconstruct them. Uses the reparameterization trick for backpropagation through
+    the stochastic latent space.
+
+    The loss function consists of:
+    - Reconstruction loss: Binary cross-entropy between input and reconstruction
+    - KL divergence loss: Regularizes the latent space to approximate N(0, 1)
+    - Total loss: reconstruction_loss + beta * kl_loss
+
+    Architecture:
+    - Encoder: Strided Conv2D layers -> Flatten -> Dense -> Latent (z_mean, z_log_var)
+    - Decoder: Dense -> Reshape -> Conv2DTranspose layers -> Reconstruction
+
+    Attributes:
+        input_shape (tuple): Shape of input images (height, width, channels).
+        latent_dim (int): Dimensionality of the latent space.
+        dense_dim (int): Dimensionality of dense layers.
+        conv_layers (tuple): Number of filters in each convolutional layer.
+        dropout (float): Dropout rate for regularization.
+        beta (float): Weight for KL divergence loss (beta-VAE parameter).
+        encoder (Model): Encoder model.
+        decoder (Model): Decoder model.
+
+    Example:
+        >>> model = CVAE(
+        ...     input_shape=(128, 128, 4),
+        ...     latent_dim=64,
+        ...     dense_dim=256,
+        ...     conv_layers=(8, 16, 32, 64, 128),
+        ...     dropout=0.25,
+        ...     beta=1.0
+        ... )
+        >>> model.compile(optimizer='adam')
+        >>> model.fit(train_data, epochs=100)
+    """
+
     def __init__(
         self,
         input_shape=(128, 128, 4),
@@ -162,6 +213,38 @@ class CVAE(Model):
 
 
 class CondCVAE(CVAE):
+    """
+    Conditional Convolutional Variational Autoencoder (CondCVAE).
+
+    Extends CVAE to support class-conditional generation. The model conditions both
+    the encoder and decoder on one-hot encoded class labels, allowing it to learn
+    class-specific latent representations and generate samples conditioned on
+    specific classes.
+
+    The conditioning is implemented by concatenating one-hot encoded labels with:
+    - Encoder: Concatenated with flattened features before dense layers
+    - Decoder: Concatenated with latent vector before dense layers
+
+    Inherits all functionality from CVAE with modified architecture to accept
+    conditional inputs.
+
+    Attributes:
+        n_classes (int): Number of classes for conditional generation (one-hot dimension).
+        All other attributes inherited from CVAE.
+
+    Example:
+        >>> model = CondCVAE(
+        ...     n_classes=3,
+        ...     input_shape=(128, 128, 4),
+        ...     latent_dim=64,
+        ...     dense_dim=256,
+        ...     beta=1.0
+        ... )
+        >>> model.compile(optimizer='adam')
+        >>> # Train with (images, conditions) tuples
+        >>> model.fit((train_images, train_conditions), epochs=100)
+    """
+
     def __init__(self, n_classes=2, **kwargs):
         self.n_classes = n_classes
         super().__init__(**kwargs)

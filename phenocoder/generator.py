@@ -324,10 +324,14 @@ class PatchGenerator:
 
         Parameters
         ----------
-        sampling_frac : float, optional
-            Fraction of samples to process
+        dataset : str
+            Name/identifier for the dataset being generated
+        dir_output : str
+            Directory path for storing the generated dataset
+        n_samples : int, optional
+            Number of samples to randomly select for processing. If None, processes all samples.
         n_patches : int, optional
-            Number of patches to sample from all available patches
+            Number of patches to randomly sample from all available patches. If None, uses all patches.
         """
         self.dir_output = Path(dir_output)
         self.dir_dataset = Path(dir_output, dataset)

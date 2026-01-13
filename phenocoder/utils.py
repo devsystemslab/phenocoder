@@ -11,6 +11,27 @@ from skimage.util import montage
 def plot_latent_space(
     model, generator, oh_enc, sample_frac=1, show=True, return_fig=False
 ):
+    """
+    Plot UMAP visualization of the latent space colored by dataset and z-position.
+
+    Generates a 2D UMAP projection of the latent space representations and creates
+    two scatter plots: one colored by dataset and one colored by z-stack position.
+
+    Args:
+        model: Trained CVAE or CondCVAE model with encoder.
+        generator: Data generator (SequenceGenerator) providing image patches.
+        oh_enc: One-hot encoder used for encoding conditions.
+        sample_frac (float, optional): Fraction of generator batches to sample for plotting.
+            Defaults to 1 (use all data).
+        show (bool, optional): Whether to display the plot. Defaults to True.
+        return_fig (bool, optional): Whether to return the figure object. Defaults to False.
+
+    Returns:
+        matplotlib.figure.Figure or None: Figure object if return_fig=True, otherwise None.
+
+    Note:
+        TODO: generalize plotting function -> add argument for conditions to plot.
+    """
     # TODO: generalize plotting function -> add argument for conditions to plot.
     reducer = umap.UMAP()
     n_samples = int(sample_frac * len(generator))
@@ -58,6 +79,23 @@ def plot_latent_space(
 def plot_reconstructions(
     model, generator, n_preview=200, batch_size=64, show=True, return_fig=False
 ):
+    """
+    Plot side-by-side comparison of input images and their VAE reconstructions.
+
+    Creates a montage visualization showing original input patches alongside their
+    reconstructions from the VAE model. Displays the first channel for all selected patches.
+
+    Args:
+        model: Trained CVAE or CondCVAE model with encoder and decoder.
+        generator: Data generator (SequenceGenerator) providing image patches.
+        n_preview (int, optional): Number of image patches to visualize. Defaults to 200.
+        batch_size (int, optional): Batch size for model predictions. Defaults to 64.
+        show (bool, optional): Whether to display the plot. Defaults to True.
+        return_fig (bool, optional): Whether to return the figure object. Defaults to False.
+
+    Returns:
+        matplotlib.figure.Figure or None: Figure object if return_fig=True, otherwise None.
+    """
     if generator.conditions is not None:
         data, conditions = zip(
             *[generator[i] for i in range((n_preview // batch_size) + 1)]
@@ -95,8 +133,19 @@ def plot_reconstructions(
 
 
 def plot_to_image(figure):
-    """Converts the matplotlib plot specified by 'figure' to a PNG image and
-    returns it. The supplied figure is closed and inaccessible after this call."""
+    """
+    Convert a matplotlib figure to a TensorFlow image tensor.
+
+    Converts the matplotlib plot to a PNG image in memory and returns it as a
+    TensorFlow tensor suitable for TensorBoard logging. The supplied figure is
+    closed and inaccessible after this call.
+
+    Args:
+        figure (matplotlib.figure.Figure): Matplotlib figure to convert.
+
+    Returns:
+        tf.Tensor: TensorFlow image tensor with shape (1, height, width, 4) in RGBA format.
+    """
     # Save the plot to a PNG in memory.
     buf = io.BytesIO()
     plt.savefig(buf, format='png')

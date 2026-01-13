@@ -101,15 +101,20 @@ class SpatialSubunitSampler:
 
     def sample(self, max_obs: int):
         """
-        Sample observations within each subunit based on max_obs threshold
+        Sample observations within each subunit based on max_obs threshold.
 
-        Uses the method specified in self.sample_method:
-        - 'random': Random subsampling
-        - 'fps': Farthest Point Sampling
-        - 'uniform': Uniform voxel-based sampling
+        Randomly subsamples observations in subunits that exceed the max_obs threshold.
+        Subunits with fewer observations than max_obs are left unchanged.
 
-        Returns:
-            None
+        Parameters
+        ----------
+        max_obs : int
+            Maximum number of observations per subunit. Subunits exceeding this
+            threshold will be randomly subsampled to this size.
+
+        Returns
+        -------
+        None
         """
         self.max_obs = max_obs
         if self.max_obs is None:

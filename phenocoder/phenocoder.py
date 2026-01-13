@@ -183,7 +183,8 @@ class Phenocoder:
         Args:
             n_latent_dim (int): Dimensionality of the latent space.
             n_dense_dim (int): Dimensionality of dense layers in the model.
-            conditional (bool): Whether to use conditional VAE (requires condition labels).
+            conditions (list[str]): List of column names in the data to use as conditions
+                for conditional VAE. If empty list or None, uses non-conditional CVAE.
             dropout (float, optional): Dropout rate for regularization. Defaults to 0.25.
             batch_size (int, optional): Batch size for training. Defaults to 64.
             n_workers (int, optional): Number of workers for data loading. Defaults to 1.
@@ -199,12 +200,22 @@ class Phenocoder:
 
         Raises:
             ValueError: If data_dir is not specified.
+            ValueError: If datasets is not specified.
 
         Example:
+            >>> # Non-conditional model
             >>> phenocoder.initialize_model(
             ...     n_latent_dim=64,
             ...     n_dense_dim=256,
-            ...     conditional=False,
+            ...     conditions=[],
+            ...     dropout=0.25,
+            ...     beta=0.01
+            ... )
+            >>> # Conditional model
+            >>> phenocoder.initialize_model(
+            ...     n_latent_dim=64,
+            ...     n_dense_dim=256,
+            ...     conditions=['dataset', 'z'],
             ...     dropout=0.25,
             ...     beta=0.01
             ... )
