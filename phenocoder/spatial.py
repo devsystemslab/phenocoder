@@ -3,6 +3,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import squidpy as sq
+from scipy.sparse import csr_array
 from scipy.spatial import ConvexHull
 from sklearn.neighbors import radius_neighbors_graph
 
@@ -530,3 +531,22 @@ class SpatialGraphAnalyzer:
         self.results = dict()
         for radius in self.radii:
             self.results[radius] = self.get_spatial_stats(radius)
+
+
+def spatial_message_passing(adata, radius):
+    # calculate knn graph in physical space
+    if adata.obsm['spatial'] is None:
+        adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
+    sq.gr.spatial_neighbors(
+        adata, radius=radius, coord_type='generic', spatial_key='spatial'
+    )
+    A = adata.obsp['spatial_connectivities'].copy()
+    A = A + csr_array(np.diag(np.ones(A.shape[0])))
+    # weight A with inverse degree matrix
+    D = np.array(A.sum(axis=1)).flatten()
+    D_inv = np.power(D, -1)
+    D_inv[np.isinf(D_inv)] = 0
+    D_inv = np.diag(D_inv)
+    A = A.dot(D_inv)
+    adata.layers['spatial_message_passing'] = np.dot(A, adata.X)
+    return adata

@@ -102,11 +102,11 @@ def example_3d():
     adata = ad.AnnData(X=df[features_X], obs=df[features_obs])
 
     # Add spatial coordinates to adata.obsm
-    adata.obsm['spatial'] = adata.obs[['centroid-1', 'centroid-0', 'z_stack']].values
+    adata.obsm['spatial'] = adata.obs[['centroid-0', 'centroid-1', 'z_stack']].values
     adata.obsm['spatial_index'] = adata.obs[
-        ['centroid-1', 'centroid-0', 'z_init']
+        ['centroid-0', 'centroid-1', 'z_init']
     ].values.astype(int)
-    spatial_coords_2d = adata.obs[['centroid-1', 'centroid-0']].values
+    spatial_coords_2d = adata.obs[['centroid-0', 'centroid-1']].values
     adata.obsm['spatial_2d'] = spatial_coords_2d
     adata.obs['instance_id'] = adata.obs.index.astype(int)
     adata.obs['region'] = 'nuclei'

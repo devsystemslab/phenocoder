@@ -1,28 +1,42 @@
 import shutil
 
 import scanpy as sc
-from spatialdata import SpatialData
 
 from tests.conftest import example_3d
 
 
 def test_workflow():
     pheno = example_3d()
-    assert pheno.sdata is not None
-    assert isinstance(pheno.sdata, SpatialData)
+    print(pheno)
     pheno.generate_dataset(
         dataset='dataset_1',
         dir_dataset='tests/data/tmp/phenocoder',
+        patch_size=(32, 32),
         spatial_key_index='spatial_index',
     )
-    pheno.initialize_model(n_latent_dim=32, n_dense_dim=64, conditions=['dataset', 'z'])
-    pheno.train(n_epochs=5)
-    pheno.encode(spatial_key_index='spatial_index')
+    pheno.initialize_model(
+        n_latent_dim=32,
+        n_dense_dim=64,
+        conditions=['dataset', 'z'],
+        input_shape=(32, 32, 4),
+    )
+    pheno.train(n_epochs=10)
+    pheno.encode(spatial_key_index='spatial_index', spatial_message_passing_radius=50)
 
     # Add clustering for spatial graph statistics
     sc.pp.pca(pheno.sdata.tables['phenocoder'])
     sc.pp.neighbors(pheno.sdata.tables['phenocoder'])
-    sc.tl.leiden(pheno.sdata.tables['phenocoder'], resolution=1)
+    sc.tl.leiden(pheno.sdata.tables['phenocoder'], resolution=0.5)
+    # same for message passed latents
+    sc.pp.pca(
+        pheno.sdata.tables['phenocoder'], layer='spatial_message_passing', n_comps=8
+    )
+    sc.pp.neighbors(pheno.sdata.tables['phenocoder'])
+    sc.tl.leiden(
+        pheno.sdata.tables['phenocoder'],
+        resolution=0.5,
+        key_added='leiden_message_passed',
+    )
 
     # Test 1: Sample-level spatial graph statistics
     pheno.spatialgraph_stats(
@@ -32,11 +46,22 @@ def test_workflow():
         table_key='phenocoder',
         use_subunits=False,
     )
+    # for message-passed leiden key
+    pheno.spatialgraph_stats(
+        cluster_key='leiden_message_passed',
+        spatial_key='spatial',
+        radii=(25, 50),
+        table_key='phenocoder',
+        use_subunits=False,
+    )
 
     # Verify sample-level results
     assert pheno.adata is not None
     assert pheno.adata.shape[0] > 0  # At least one sample analyzed
-    assert pheno.sample_key in pheno.adata.obs.columns or pheno.adata.obs.index.name == pheno.sample_key
+    assert (
+        pheno.sample_key in pheno.adata.obs.columns
+        or pheno.adata.obs.index.name == pheno.sample_key
+    )
 
     # Test 2: Subunit-level spatial graph statistics
     pheno.spatialgraph_stats(

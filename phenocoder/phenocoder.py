@@ -13,7 +13,7 @@ import yaml
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
-from phenocoder.spatial import SpatialGraphAnalyzer
+from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
 from phenocoder.utils import write_training_plots_to_tensorboard
 
 
@@ -103,6 +103,52 @@ class Phenocoder:
         self.dir_tensorboard: Path | None = kwargs.get('dir_tensorboard', None)
         self.data_loader = kwargs.get('data_loader', None)
 
+    def __repr__(self) -> str:
+        """
+        Return a formatted string representation of the Phenocoder instance.
+
+        Returns:
+            str: A summary of the Phenocoder object's structure and configuration.
+        """
+        lines = ['Phenocoder object with:']
+
+        # SpatialData info
+        if self.sdata is not None:
+            lines.append(f'sdata: {self.sdata}')
+        else:
+            lines.append('sdata: None')
+        # Adata info
+        if self.adata is not None:
+            lines.append(f'adata: {self.adata}')
+        else:
+            lines.append('adata: None')
+        # Model info
+        if self.model is not None:
+            model_type = type(self.model).__name__
+            lines.append(f'model: {model_type}')
+        else:
+            lines.append('model: None')
+
+        # Configuration keys
+        config_info = []
+        if self.sample_key is not None:
+            config_info.append(f'sample_key={repr(self.sample_key)}')
+        if self.table_key is not None:
+            config_info.append(f'table_key={repr(self.table_key)}')
+        if self.image_key is not None:
+            config_info.append(f'image_key={repr(self.image_key)}')
+        if self.spatial_key is not None:
+            config_info.append(f'spatial_key={repr(self.spatial_key)}')
+
+        if config_info:
+            lines.append(f'config: {", ".join(config_info)}')
+
+        # Dataset info
+        if self.datasets is not None and len(self.datasets) > 0:
+            lines.append(f'datasets: {len(self.datasets)} dataset(s)')
+
+        return '\n'.join(lines)
+
     def add_sdata(self, sdata: sd.SpatialData) -> None:
         """
         Add a SpatialData object to the Phenocoder instance.
@@ -121,8 +167,15 @@ class Phenocoder:
         self.sdata = sdata
 
     def generate_dataset(
-        self, dataset, dir_dataset, patch_size=(128, 128), spatial_key_index=None, scale=True,
-        metadata_keys=None, scale_percentile=1, scale_per_sample=True,
+        self,
+        dataset,
+        dir_dataset,
+        patch_size=(128, 128),
+        spatial_key_index=None,
+        scale=True,
+        metadata_keys=None,
+        scale_percentile=1,
+        scale_per_sample=True,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -333,7 +386,7 @@ class Phenocoder:
             >>> phenocoder.load_model()
         """
         config_path = Path(self.model_config)
-        self.model_dir = config_path.parent 
+        self.model_dir = config_path.parent
 
         with open(self.model_config, 'r') as file:
             self.model_config = yaml.load(file, Loader=yaml.FullLoader)
@@ -355,7 +408,7 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
             )
         self.model.compile()
-        self.model.build(tuple(self.model_config['input_shape'])) 
+        self.model.build(tuple(self.model_config['input_shape']))
         self.model.load_weights(Path(self.model_dir, 'model.weights.h5'))
 
     def summarize_model(self) -> None:
@@ -463,8 +516,13 @@ class Phenocoder:
             )
 
     def encode(
-        self, batch_size: int = 64, scale=True, spatial_key_index=None,
-        scale_percentile=1, scale_per_sample=True,
+        self,
+        batch_size: int = 64,
+        scale: bool = True,
+        spatial_key_index: str = None,
+        scale_percentile: int = 1,
+        scale_per_sample: bool = True,
+        spatial_message_passing_radius: int = None,
     ) -> ad.AnnData:
         """
         Encode nuclei patches into latent space representations using the trained model.
@@ -495,7 +553,7 @@ class Phenocoder:
             >>> encoded_data = phenocoder.encode(batch_size=128)
             >>> print(encoded_data.shape)  # (n_nuclei, n_latent_dim)
         """
-        adata = []
+        adatas = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
         if self.patch_generator is None:
             if spatial_key_index is None:
@@ -531,9 +589,9 @@ class Phenocoder:
             sample_to_dataset = (
                 patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
             )
-            self.patch_generator.patches['dataset'] = (
-                self.patch_generator.patches[self.sample_key].map(sample_to_dataset)
-            )
+            self.patch_generator.patches['dataset'] = self.patch_generator.patches[
+                self.sample_key
+            ].map(sample_to_dataset)
             if scale:
                 stats_dfs = [
                     pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'stats.csv'))
@@ -554,19 +612,21 @@ class Phenocoder:
                 )
             else:
                 _, _, z = self.model.encoder.predict(patches, batch_size=batch_size)
-
-            adata.append(
-                ad.AnnData(
-                    X=z,
-                    obs=self.sdata.tables[self.table_key][df_patches.index].obs,
-                    obsm=self.sdata.tables[self.table_key][df_patches.index].obsm,
-                    uns=self.sdata.tables[self.table_key][df_patches.index].uns,
-                    var=pd.DataFrame(
-                        index=[f'phc_latent_{i + 1}' for i in range(z.shape[-1])]
-                    ),
-                )
+            adata = ad.AnnData(
+                X=z,
+                obs=self.sdata.tables[self.table_key][df_patches.index].obs,
+                obsm=self.sdata.tables[self.table_key][df_patches.index].obsm,
+                uns=self.sdata.tables[self.table_key][df_patches.index].uns,
+                var=pd.DataFrame(
+                    index=[f'phc_latent_{i + 1}' for i in range(z.shape[-1])]
+                ),
             )
-        self.sdata.tables['phenocoder'] = ad.concat(adata)
+            if spatial_message_passing_radius is not None:
+                adata = spatial_message_passing(
+                    adata, radius=spatial_message_passing_radius
+                )
+            adatas.append(adata)
+        self.sdata.tables['phenocoder'] = ad.concat(adatas)
 
     def spatialgraph_stats(
         self,
