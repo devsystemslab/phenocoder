@@ -30,22 +30,26 @@ class PatchGenerator:
         scale_per_sample: bool = True,
     ):
         """
-        Initialize DatasetGenerator.
+        Initialize PatchGenerator.
 
         Parameters
         ----------
         sdata : SpatialData
             Spatial data object containing images and tables
         image_key : str
-            Key for accessing images in sdata.images
+            Key prefix for accessing images in sdata.images (images are read per sample
+            as ``f"{image_key}_{sample}"``)
         spatial_key : str
-            Key for accessing spatial coordinates in sdata.tables
+            Key in ``sdata.tables[table_key].obsm`` holding the (y, x, z) coordinates used
+            to center patches
         table_key : str
-            Key for accessing tables in sdata.tables
+            Key for accessing the object table in sdata.tables
         sample_key : str
-            Key for sample identification in observations
-        dir_output : str or Path
-            Output directory for generated datasets
+            obs column used for sample identification
+        scale : bool
+            Whether patches are intensity-scaled using the computed percentiles
+        patch_size : tuple of int, default (128, 128)
+            Patch (height, width) extracted around each object
         metadata_keys : list of str, optional
             Additional columns from ``sdata.tables[table_key].obs`` to copy into the
             patches dataframe (and ``patches.csv``)
@@ -53,9 +57,8 @@ class PatchGenerator:
             Percentile (in 0-100) used when computing each slice's low/high in the
             image statistics
         scale_per_sample : bool, default True
-            How the per-slice percentiles are aggregated for normalization
-        max_workers : int, default 12
-            Maximum number of worker threads for parallel processing
+            If True, aggregate the per-slice percentiles per (sample, channel) so each
+            sample is normalized to its own range; if False, aggregate globally per channel
         """
         self.sdata = sdata
         self.image_key = image_key
@@ -457,18 +460,13 @@ class SequenceGenerator(Sequence):
             Number of channels in patches
         shuffle : bool, default True
             Whether to shuffle patch order each epoch
-        scale : bool, default False
-            Whether to apply intensity scaling
         flip : bool, default False
-            Whether to apply random flipping augmentation
-        percentiles_low : array-like, optional
-            Low quantiles for intensity normalization
-        percentiles_high : array-like, optional
-            High quantiles for intensity normalization
+            Whether to apply random horizontal/vertical flipping augmentation
         conditions : array-like, optional
-            Condition labels for conditional generation
+            One-hot encoded condition labels for conditional generation. If provided, each
+            batch is returned as ``(patches, conditions)``
         return_conditions : bool, default False
-            Whether to return conditions along with patches
+            Accepted for API symmetry; conditions are returned whenever ``conditions`` is set
         **kwargs
             Additional arguments passed to parent Sequence class
         """
@@ -571,7 +569,7 @@ class DatasetLoader:
 
     def __init__(self, datasets: list, dir_datasets: str, sample_key: str):
         """
-        Initialize DatasetMerger.
+        Initialize DatasetLoader.
 
         Parameters
         ----------
@@ -579,6 +577,8 @@ class DatasetLoader:
             List of dataset names to merge
         dir_datasets : str
             Base directory containing dataset subdirectories
+        sample_key : str
+            obs column used to group patches into samples for the train/val split
         """
         self.dir_datasets = dir_datasets
         self.datasets = datasets
@@ -607,29 +607,18 @@ class DatasetLoader:
 
     def set_train_val_split(self, batch_size=64, split: float = 0.8):
         """
-        Setup generators for training and validation.
+        Assign each patch to a train or validation split.
+
+        Splits are made at the sample level (grouped by ``sample_key`` and ``dataset``) so all
+        patches of a sample land in the same split, then each split is truncated to a whole
+        number of batches. Adds ``split`` and ``file_path`` columns to ``self.patches``.
 
         Parameters
         ----------
-        dir_datasets : str
-            Directory containing datasets
-        conditional : bool, default False
-            Whether to return conditions with data
         batch_size : int, default 64
-            Batch size for generators
-        dim : tuple, default (128, 128)
-            Dimensions of patches
-        n_channels : int, default 4
-            Number of channels
-        shuffle : bool, default True
-            Whether to shuffle data
-        n_workers : int, default 1
-            Number of workers for data generation
-
-        Returns
-        -------
-        tuple
-            Training generator, validation generator, dataframe, and encoder
+            Batch size used to drop the remainder so each split is batch-aligned
+        split : float, default 0.8
+            Fraction of samples assigned to the training split
         """
         self.load_datasets()
         self.patches = self.patches.sample(frac=1, random_state=42, replace=False)
@@ -667,6 +656,34 @@ class DatasetLoader:
         shuffle=True,
         n_workers=1,
     ):
+        """
+        Build the training and validation Keras Sequence generators.
+
+        Requires ``set_train_val_split`` to have been called (patches must have ``split`` and
+        ``file_path`` columns).
+
+        Parameters
+        ----------
+        conditions : list of str
+            obs/patch columns to one-hot encode and feed as conditions. If empty, plain
+            (non-conditional) generators are returned
+        batch_size : int, default 64
+            Number of patches per batch
+        dim : tuple, default (128, 128)
+            Spatial (height, width) of patches
+        n_channels : int, default 4
+            Number of image channels
+        shuffle : bool, default True
+            Whether to shuffle patch order each epoch
+        n_workers : int, default 1
+            Number of worker processes for the Keras Sequence
+
+        Returns
+        -------
+        tuple
+            ``(train_generator, val_generator, one_hot_encoder)`` if ``conditions`` is non-empty,
+            otherwise ``(train_generator, val_generator)``
+        """
         if conditions:
             enc = OneHotEncoder()
             cond = enc.fit_transform(self.patches[conditions]).toarray()
