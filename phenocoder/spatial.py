@@ -65,16 +65,14 @@ class SpatialGraphAnalyzer:
         """
         Calculate convex hull volume, area, and density for spatial data.
 
+        Operates on ``self.adata`` (uses the 'z', 'centroid-0', 'centroid-1' obs columns).
+
         Parameters
         ----------
-        adata : ad.AnnData
-            Annotated data object containing spatial coordinates.
         radius : int, default 100
             Radius for neighbor graph construction.
         degree_threshold : int, default 5
             Minimum degree threshold for filtering points.
-        filter_obs : bool, default False
-            Whether to filter observations by sample.
 
         Returns
         -------
@@ -129,13 +127,13 @@ class SpatialGraphAnalyzer:
         Parameters
         ----------
         clusters : list
-            List of cluster identifiers to include.
-        cluster_key : str
-            Key for cluster labels.
+            List of cluster identifiers to include (matched against self.cluster_key).
         radius : int, default 100
             Radius for neighbor graph construction.
         min_nds : int, default 10
             Minimum number of nodes for connected components.
+        min_degree : int, default 3
+            Drop nodes with fewer than this many connections before extracting components.
 
         Returns
         -------
@@ -202,19 +200,14 @@ class SpatialGraphAnalyzer:
         """
         Calculate interaction matrices between clusters.
 
-        Parameters
-        ----------
-        adata : ad.AnnData
-            Annotated data object with spatial connectivity.
-        well : str
-            Well identifier.
-        plate : str
-            Plate identifier.
+        Computes both normalized and raw cluster-cluster interaction counts on
+        ``self.adata`` (requires spatial neighbors to have been computed).
 
         Returns
         -------
         pd.DataFrame
-            DataFrame containing normalized and raw interaction counts.
+            DataFrame containing normalized and raw interaction counts, one row indexed
+            by self.index.
         """
 
         # interaction matrix
@@ -256,19 +249,14 @@ class SpatialGraphAnalyzer:
         """
         Calculate Moran's I spatial autocorrelation for features.
 
-        Parameters
-        ----------
-        adata : ad.AnnData
-            Annotated data object with spatial connectivity.
-        well : str
-            Well identifier.
-        plate : str
-            Plate identifier.
+        Operates on ``self.adata.var`` features using the precomputed
+        ``spatial_connectivities``; returns zeros if the graph has no edges.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame containing Moran's I values for each feature.
+            DataFrame containing Moran's I values for each feature, one row indexed
+            by self.index.
         """
         adata = self.adata.copy()
         if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
@@ -293,19 +281,14 @@ class SpatialGraphAnalyzer:
         """
         Calculate Moran's I spatial autocorrelation for cluster assignments.
 
-        Parameters
-        ----------
-        adata : ad.AnnData
-            Annotated data object with spatial connectivity and leiden clusters.
-        well : str
-            Well identifier.
-        plate : str
-            Plate identifier.
+        One-hot encodes ``self.cluster_key`` and computes Moran's I per cluster using the
+        precomputed ``spatial_connectivities``; returns zeros if the graph has no edges.
 
         Returns
         -------
         pd.DataFrame
-            DataFrame containing Moran's I values for each cluster.
+            DataFrame containing Moran's I values for each cluster, one row indexed
+            by self.index.
         """
         # one hot encode cluster labels
         df = pd.get_dummies(self.adata.obs[self.cluster_key]).astype(int)
@@ -534,6 +517,28 @@ class SpatialGraphAnalyzer:
 
 
 def spatial_message_passing(adata, radius):
+    """
+    Smooth latent representations over a spatial neighborhood graph.
+
+    Builds a radius-based spatial connectivity graph in physical space, adds self-loops,
+    and applies a degree-normalized adjacency matrix ``A' = (A + I) · D⁻¹`` to ``adata.X``.
+    Each object's smoothed latent is the (degree-normalized) average of itself and its
+    spatial neighbors. The result is stored in ``adata.layers['spatial_message_passing']``.
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
+        (falls back to the 'x', 'y', 'z' obs columns if 'spatial' is missing).
+    radius : int
+        Radius (in spatial units) used to connect neighboring objects.
+
+    Returns
+    -------
+    ad.AnnData
+        The same object, with the smoothed latents added as
+        ``.layers['spatial_message_passing']``.
+    """
     # calculate knn graph in physical space
     if adata.obsm['spatial'] is None:
         adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()

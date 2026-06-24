@@ -39,14 +39,18 @@ class Phenocoder:
         df_conditions (DataFrame | None): DataFrame containing condition information for conditional models.
 
     Example:
-        >>> phenocoder = Phenocoder()
+        >>> phenocoder = Phenocoder(
+        ...     table_key="nuclei_features", sample_key="well", image_key="IF"
+        ... )
         >>> phenocoder.add_sdata(sdata)
-        >>> phenocoder.data_dir = "path/to/data"
-        >>> phenocoder.sample_key = "sample_id"
-        >>> phenocoder.generate_dataset(dir_input="input", dir_segmented="segmented")
-        >>> phenocoder.initialize_model(n_latent_dim=64, n_dense_dim=256, conditional=False)
+        >>> phenocoder.generate_dataset(
+        ...     dataset="dataset_1",
+        ...     dir_dataset="data/phenocoder",
+        ...     spatial_key_index="spatial_index",
+        ... )
+        >>> phenocoder.initialize_model(n_latent_dim=64, n_dense_dim=256, conditions=[])
         >>> phenocoder.train(n_epochs=100)
-        >>> encoded_data = phenocoder.encode()
+        >>> phenocoder.encode()  # writes latents to sdata.tables['phenocoder']
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -187,6 +191,8 @@ class Phenocoder:
         Args:
             dataset (str): Name/identifier for the dataset being generated.
             dir_dataset (str | Path): Directory path for storing the generated dataset.
+            patch_size (tuple[int, int], optional): Patch (height, width) extracted around each
+                object. Must match the height/width of the model's input_shape. Defaults to (128, 128).
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
             If None, uses the instance's spatial_key attribute. Defaults to None.
             scale (bool, optional): Whether to scale the image patches. Defaults to True.
@@ -207,7 +213,9 @@ class Phenocoder:
         Example:
             >>> phenocoder.generate_dataset(
             ...     dataset="experiment_001",
-            ...     dir_dataset="/path/to/datasets"
+            ...     dir_dataset="/path/to/datasets",
+            ...     patch_size=(32, 32),
+            ...     spatial_key_index="spatial_index",
             ... )
         """
         if spatial_key_index is None:
@@ -262,7 +270,7 @@ class Phenocoder:
             conv_layers (tuple[int, ...], optional): Number of filters in each convolutional layer.
                 Defaults to (8, 16, 32, 64, 128).
             beta (float, optional): Beta parameter for beta-VAE (controls KL divergence weight).
-                Defaults to 1.
+                Defaults to 0.01.
 
         Returns:
             None
@@ -453,6 +461,8 @@ class Phenocoder:
             learning_rate (float, optional): Initial learning rate for optimizer. Defaults to 0.001.
             min_learning_rate (float, optional): Minimum learning rate for learning rate scheduler.
                 Defaults to 0.0001.
+            factor_learning_rate (float, optional): Multiplicative factor by which the learning
+                rate is reduced on plateau (ReduceLROnPlateau). Defaults to 0.2.
             learning_rate_patience (int, optional): Number of epochs without improvement before
                 reducing learning rate. Defaults to 3.
             early_stopping_patience (int, optional): Number of epochs without improvement before
@@ -533,25 +543,33 @@ class Phenocoder:
 
         Args:
             batch_size (int, optional): Batch size for encoding predictions. Defaults to 64.
-            filter_encodable_conditions (bool, optional): Whether to filter out conditions
-                that cannot be encoded by the model (for conditional models). Defaults to False.
+            scale (bool, optional): Whether to intensity-scale patches before encoding. Used
+                only when the patch_generator is (re)built here. Defaults to True.
+            spatial_key_index (str | None, optional): obsm key (integer z-index coords) used to
+                extract patches. If None, falls back to self.spatial_key. Defaults to None.
             scale_percentile (float, optional): Percentile (0-100) for per-slice low/high, used
                 only when the patch_generator is (re)built here. MUST match the value used in
                 ``generate_dataset`` for this model's dataset. Defaults to 1.
             scale_per_sample (bool, optional): Per-sample vs global normalization, used only when
                 the patch_generator is (re)built here. MUST match ``generate_dataset`` for this
                 model's dataset, else inference scales differently than training. Defaults to True.
+            spatial_message_passing_radius (int | None, optional): If set, smooth each sample's
+                latents over a spatial neighborhood graph of this radius (degree-normalized
+                aggregation), stored in ``.layers['spatial_message_passing']``. If None, no
+                message passing is applied. Defaults to None.
 
         Returns:
-            ad.AnnData: AnnData object containing encoded latent representations with
-                nuclei metadata in .obs and latent dimensions in .X.
+            None: The encoded latents are written to ``self.sdata.tables['phenocoder']`` as an
+                AnnData object (latents in ``.X``, object metadata carried in ``.obs``/``.obsm``,
+                latent dimensions named ``phc_latent_{i}`` in ``.var``).
 
         Note:
-            This method contains dataset-specific code that should be generalized.
+            This method contains dataset-specific code (the 'z'/'dataset' conditions) that
+            should be generalized.
 
         Example:
-            >>> encoded_data = phenocoder.encode(batch_size=128)
-            >>> print(encoded_data.shape)  # (n_nuclei, n_latent_dim)
+            >>> phenocoder.encode(batch_size=128, spatial_message_passing_radius=50)
+            >>> phenocoder.sdata.tables['phenocoder']  # AnnData of latents
         """
         adatas = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
@@ -953,7 +971,7 @@ class Phenocoder:
             - .layers['raw']: Raw data before scaling
             - .obsm['X_pca']: PCA coordinates
             - .obsm['X_umap']: UMAP coordinates (if umap=True)
-            - .obs['leiden']: Leiden cluster assignments
+            plus the neighbor graph in .obsp. (Clustering, e.g. leiden, is left to the caller.)
 
         Example:
             >>> phenocoder.spatialgraph_embedding(
