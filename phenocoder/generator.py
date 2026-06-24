@@ -24,7 +24,7 @@ class PatchGenerator:
         table_key: str,
         sample_key: str,
         scale: bool,
-        patch_size: (int, int),
+        patch_size: tuple[int, int] = (128, 128),
         metadata_keys: list[str] | None = None,
         scale_percentile: float = 1,
         scale_per_sample: bool = True,
