@@ -24,6 +24,10 @@ class PatchGenerator:
         table_key: str,
         sample_key: str,
         scale: bool,
+        patch_size: (int, int),
+        metadata_keys: list[str] | None = None,
+        scale_percentile: float = 1,
+        scale_per_sample: bool = True,
     ):
         """
         Initialize DatasetGenerator.
@@ -42,6 +46,14 @@ class PatchGenerator:
             Key for sample identification in observations
         dir_output : str or Path
             Output directory for generated datasets
+        metadata_keys : list of str, optional
+            Additional columns from ``sdata.tables[table_key].obs`` to copy into the
+            patches dataframe (and ``patches.csv``)
+        scale_percentile : float, default 1
+            Percentile (in 0-100) used when computing each slice's low/high in the
+            image statistics
+        scale_per_sample : bool, default True
+            How the per-slice percentiles are aggregated for normalization
         max_workers : int, default 12
             Maximum number of worker threads for parallel processing
         """
@@ -51,6 +63,9 @@ class PatchGenerator:
         self.table_key = table_key
         self.sample_key = sample_key
         self.scale = scale
+        self.scale_percentile = scale_percentile
+        self.scale_per_sample = scale_per_sample
+        self.metadata_keys = metadata_keys or []
         image_key_init = '_'.join(
             [
                 self.image_key,
@@ -59,11 +74,15 @@ class PatchGenerator:
         )
         self.channels = self.sdata.images[image_key_init].coords['c'].values.tolist()
         self.image_size = self.sdata.images[image_key_init].shape[-2:]
-        self.patch_size = (128, 128)
+        self.patch_size = patch_size
         self.df_stats = pd.DataFrame()
         self.patches = None
         self.percentiles_low = None
         self.percentiles_high = None
+        # per-sample lookups {sample_id: array over channels}, built by
+        # get_scaling_percentiles when scale_per_sample is True
+        self.sample_percentiles_low = None
+        self.sample_percentiles_high = None
 
     def init_patches(self):
         """
@@ -81,25 +100,38 @@ class PatchGenerator:
         self.patches[self.sample_key] = self.sdata.tables[self.table_key].obs[
             self.sample_key
         ]
+        # carry user-requested obs columns so they can be used as conditions
+        for key in self.metadata_keys:
+            if key in (self.sample_key, 'x', 'y', 'z'):
+                continue
+            self.patches[key] = self.sdata.tables[self.table_key].obs[key]
         # round to integer
         self.patches['x'] = self.patches['x'].astype(int)
         self.patches['y'] = self.patches['y'].astype(int)
 
         # filter x and y that are within image boundaries when patch size is added
-        x_min, x_max = (
-            self.patch_size[0] // 2,
-            self.image_size[1] - self.patch_size[0] // 2,
-        )
-        y_min, y_max = (
-            self.patch_size[0] // 2,
-            self.image_size[0] - self.patch_size[0] // 2,
-        )
-        self.patches = self.patches[
-            (self.patches['x'] >= x_min)
-            & (self.patches['x'] <= x_max)
-            & (self.patches['y'] >= y_min)
-            & (self.patches['y'] <= y_max)
-        ]
+        # (per-sample, since images may differ in size)
+        filtered = []
+        for sample_id, grp in self.patches.groupby(self.sample_key):
+            image_size = self.sdata.images[
+                '_'.join([self.image_key, str(sample_id)])
+            ].shape[-2:]
+            x_min, x_max = (
+                self.patch_size[0] // 2,
+                image_size[1] - (self.patch_size[0] - self.patch_size[0] // 2),
+            )
+            y_min, y_max = (
+                self.patch_size[1] // 2,
+                image_size[0] - (self.patch_size[1] - self.patch_size[1] // 2),
+            )
+            grp = grp[
+                (grp['x'] >= x_min)
+                & (grp['x'] < x_max)
+                & (grp['y'] >= y_min)
+                & (grp['y'] < y_max)
+            ]
+            filtered.append(grp)
+        self.patches = pd.concat(filtered)
 
         self.patches['id'] = np.arange(0, len(self.patches))
 
@@ -154,7 +186,7 @@ class PatchGenerator:
         return img
 
     def __get_image_stats__(
-        self, imgs: np.ndarray, id: str, id_name: str, percentile: int = 1
+        self, imgs: np.ndarray, id: str, id_name: str, percentile: float | None = None
     ):
         """
         Calculate comprehensive statistics for image data.
@@ -167,12 +199,17 @@ class PatchGenerator:
             Identifier for the image/patch
         id_name : str
             Name of the ID column
+        percentile : float, optional
+            Percentile (0-100) for the low/high columns; the high uses
+            ``100 - percentile``. Defaults to ``self.scale_percentile``.
 
         Returns
         -------
         DataFrame
             Statistics for each channel including mean, std, quantiles, etc.
         """
+        if percentile is None:
+            percentile = self.scale_percentile
         if imgs.ndim == 3:
             imgs = imgs[:, np.newaxis, :, :]
 
@@ -245,6 +282,16 @@ class PatchGenerator:
         df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
         img_key_sample = '_'.join([self.image_key, sample_id])
         img = np.asarray(self.sdata.images[img_key_sample])
+        if self.scale and self.scale_per_sample:
+            # activate this sample's own scaling range for extract_patch.
+            # copy: extract_patch may bump percentiles_high in place when low==high
+            if self.sample_percentiles_low is None:
+                raise ValueError(
+                    'Per-sample scaling requested but percentiles not computed; '
+                    'call get_scaling_percentiles() first'
+                )
+            self.percentiles_low = self.sample_percentiles_low[sample_id].copy()
+            self.percentiles_high = self.sample_percentiles_high[sample_id].copy()
         return df_patches_sample, img
 
     def write_patches(self, sample_id: str):
@@ -286,12 +333,18 @@ class PatchGenerator:
         """
         Extract and set scaling percentiles from computed statistics.
 
-        Computes conservative percentiles across all samples and z-stacks for each channel
-        to use for normalization during patch extraction. Uses the minimum of percentile_low
-        values and maximum of percentile_high values to avoid clipping any samples.
+        Aggregates the per-slice ``percentile_low`` / ``percentile_high`` values in
+        ``df_stats`` into a conservative range -- minimum of lows (darkest) and
+        maximum of highs (brightest) -- used to normalize patches in
+        ``extract_patch``. The grouping depends on ``scale_per_sample``:
 
-        Sets the percentiles_low and percentiles_high attributes based on the
-        percentile_low and percentile_high values in df_stats.
+        - ``scale_per_sample=True`` (default): aggregate per (sample, channel), so
+          each sample is scaled to its own intensity range. Stored in
+          ``sample_percentiles_low`` / ``sample_percentiles_high`` keyed by sample;
+          ``select_patches`` activates the right one per sample.
+        - ``scale_per_sample=False``: aggregate per channel across all samples/slices
+          (the original global behaviour). Stored directly in ``percentiles_low`` /
+          ``percentiles_high``.
 
         Raises
         ------
@@ -301,16 +354,25 @@ class PatchGenerator:
         if self.df_stats is None or self.df_stats.empty:
             raise ValueError('Statistics not computed yet')
 
-        # Group by channel and compute conservative percentiles to avoid clipping
-        # Use min for low percentile (darkest values) and max for high percentile (brightest values)
-        self.percentiles_low = self.df_stats.groupby('channel')['percentile_low'].min()
-        self.percentiles_high = self.df_stats.groupby('channel')[
-            'percentile_high'
-        ].max()
-
-        # Set percentiles in the same order as self.channels
-        self.percentiles_low = self.percentiles_low.loc[self.channels].values
-        self.percentiles_high = self.percentiles_high.loc[self.channels].values
+        if self.scale_per_sample:
+            # Per (sample, channel): conservative range over the sample's own slices.
+            low = self.df_stats.groupby(['sample_id', 'channel'])[
+                'percentile_low'
+            ].min()
+            high = self.df_stats.groupby(['sample_id', 'channel'])[
+                'percentile_high'
+            ].max()
+            # -> {sample_id: array ordered like self.channels} for per-channel indexing
+            low = low.unstack('channel')[self.channels]
+            high = high.unstack('channel')[self.channels]
+            self.sample_percentiles_low = {s: r.values for s, r in low.iterrows()}
+            self.sample_percentiles_high = {s: r.values for s, r in high.iterrows()}
+        else:
+            # Global per channel across all samples/slices (original behaviour).
+            low = self.df_stats.groupby('channel')['percentile_low'].min()
+            high = self.df_stats.groupby('channel')['percentile_high'].max()
+            self.percentiles_low = low.loc[self.channels].values
+            self.percentiles_high = high.loc[self.channels].values
 
     def generate_dataset(
         self,
