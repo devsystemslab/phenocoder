@@ -96,6 +96,7 @@ class Phenocoder:
         self.data_generator_train = kwargs.get('data_generator_train', None)
         self.data_generator_val = kwargs.get('data_generator_val', None)
         self.df_conditions = kwargs.get('df_conditions', None)
+        self.patch_generator = kwargs.get('patch_generator', None)
 
         # Other optional attributes that may be set later
         self.model_name: str | None = kwargs.get('model_name', None)
@@ -120,7 +121,8 @@ class Phenocoder:
         self.sdata = sdata
 
     def generate_dataset(
-        self, dataset, dir_dataset, spatial_key_index=None, scale=True
+        self, dataset, dir_dataset, patch_size=(128, 128), spatial_key_index=None, scale=True,
+        metadata_keys=None, scale_percentile=1, scale_per_sample=True,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -135,6 +137,16 @@ class Phenocoder:
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
             If None, uses the instance's spatial_key attribute. Defaults to None.
             scale (bool, optional): Whether to scale the image patches. Defaults to True.
+            metadata_keys (list[str] | None, optional): Additional columns from the table's
+                ``.obs`` to carry into ``patches.csv`` so they can be used as conditioning
+                variables (e.g. a ``sample``/donor column). Defaults to None.
+            scale_percentile (float, optional): Percentile (0-100) for the per-slice low/high
+                used in normalization; the high uses ``100 - scale_percentile``. Defaults to 1
+                (1/99 stretch).
+            scale_per_sample (bool, optional): If True (default), normalize each sample to its
+                own intensity range (per sample+channel). If False, use one global range per
+                channel across all samples (original behaviour). NOTE: pass the SAME value to
+                ``encode`` so training and inference scale identically.
 
         Returns:
             None
@@ -159,6 +171,10 @@ class Phenocoder:
             image_key=self.image_key,
             spatial_key=spatial_key_index,
             scale=scale,
+            patch_size=patch_size,
+            metadata_keys=metadata_keys,
+            scale_percentile=scale_percentile,
+            scale_per_sample=scale_per_sample,
         )
         self.patch_generator.generate_dataset(dataset, dir_output=self.data_dir)
 
@@ -172,7 +188,7 @@ class Phenocoder:
         n_workers: int = 1,
         input_shape: tuple[int, ...] = (128, 128, 4),
         conv_layers: tuple[int, ...] = (8, 16, 32, 64, 128),
-        beta: float = 1,
+        beta: float = 0.01,
     ) -> None:
         """
         Initialize a CVAE or conditional CVAE model with specified parameters.
@@ -255,7 +271,11 @@ class Phenocoder:
                 self.data_generator_train,
                 self.data_generator_val,
                 self.model_oh_enc,
-            ) = self.data_loader.get_generators(conditions=conditions)
+            ) = self.data_loader.get_generators(
+                conditions=conditions,
+                dim=input_shape[:2],
+                n_channels=input_shape[-1],
+            )
             self.model_config.update(
                 {
                     'conditional': True,
@@ -264,7 +284,9 @@ class Phenocoder:
             )
         else:
             self.data_generator_train, self.data_generator_val = (
-                self.data_loader.get_generators()
+                self.data_loader.get_generators(
+                    dim=input_shape[:2], n_channels=input_shape[-1]
+                )
             )
             self.model_config.update({'conditional': False})
 
@@ -310,6 +332,9 @@ class Phenocoder:
             >>> phenocoder.model_config = "path/to/config.yaml"
             >>> phenocoder.load_model()
         """
+        config_path = Path(self.model_config)
+        self.model_dir = config_path.parent 
+
         with open(self.model_config, 'r') as file:
             self.model_config = yaml.load(file, Loader=yaml.FullLoader)
 
@@ -321,7 +346,7 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
                 n_classes=self.model_config['conditions_dim'],
             )
-            self.oh_enc = joblib.load(Path(self.model_directory, 'oh_encoder.joblib'))
+            self.model_oh_enc = joblib.load(Path(self.model_dir, 'oh_encoder.joblib'))
         else:
             self.model = CVAE(
                 input_shape=tuple(self.model_config['input_shape']),
@@ -330,7 +355,8 @@ class Phenocoder:
                 conv_layers=tuple(self.model_config['conv_layers']),
             )
         self.model.compile()
-        self.model.load_weights(Path(self.model_directory, 'model.weights.h5'))
+        self.model.build(tuple(self.model_config['input_shape'])) 
+        self.model.load_weights(Path(self.model_dir, 'model.weights.h5'))
 
     def summarize_model(self) -> None:
         """
@@ -437,7 +463,8 @@ class Phenocoder:
             )
 
     def encode(
-        self, batch_size: int = 64, scale=True, spatial_key_index=None
+        self, batch_size: int = 64, scale=True, spatial_key_index=None,
+        scale_percentile=1, scale_per_sample=True,
     ) -> ad.AnnData:
         """
         Encode nuclei patches into latent space representations using the trained model.
@@ -450,6 +477,12 @@ class Phenocoder:
             batch_size (int, optional): Batch size for encoding predictions. Defaults to 64.
             filter_encodable_conditions (bool, optional): Whether to filter out conditions
                 that cannot be encoded by the model (for conditional models). Defaults to False.
+            scale_percentile (float, optional): Percentile (0-100) for per-slice low/high, used
+                only when the patch_generator is (re)built here. MUST match the value used in
+                ``generate_dataset`` for this model's dataset. Defaults to 1.
+            scale_per_sample (bool, optional): Per-sample vs global normalization, used only when
+                the patch_generator is (re)built here. MUST match ``generate_dataset`` for this
+                model's dataset, else inference scales differently than training. Defaults to True.
 
         Returns:
             ad.AnnData: AnnData object containing encoded latent representations with
@@ -467,6 +500,16 @@ class Phenocoder:
         if self.patch_generator is None:
             if spatial_key_index is None:
                 spatial_key_index = self.spatial_key
+            # condition columns the encoder was trained on that must be carried
+            # from obs into the patches dataframe; 'z' comes from spatial coords and
+            # 'dataset' is reconstructed from the saved patches.csv below.
+            metadata_keys = None
+            if self.model_config['conditional']:
+                metadata_keys = [
+                    c
+                    for c in self.model_oh_enc.feature_names_in_
+                    if c not in ('z', 'dataset')
+                ]
             self.patch_generator = PatchGenerator(
                 sdata=self.sdata,
                 sample_key=self.sample_key,
@@ -474,7 +517,30 @@ class Phenocoder:
                 image_key=self.image_key,
                 spatial_key=spatial_key_index,
                 scale=scale,
+                patch_size=tuple(self.model_config['input_shape'][:2]),
+                metadata_keys=metadata_keys,
+                scale_percentile=scale_percentile,
+                scale_per_sample=scale_per_sample,
             )
+            self.patch_generator.init_patches()
+            patches_dfs = [
+                pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'patches.csv'))
+                for ds in self.datasets
+            ]
+            patches_meta = pd.concat(patches_dfs, ignore_index=True)
+            sample_to_dataset = (
+                patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
+            )
+            self.patch_generator.patches['dataset'] = (
+                self.patch_generator.patches[self.sample_key].map(sample_to_dataset)
+            )
+            if scale:
+                stats_dfs = [
+                    pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'stats.csv'))
+                    for ds in self.datasets
+                ]
+                self.patch_generator.df_stats = pd.concat(stats_dfs, ignore_index=True)
+                self.patch_generator.get_scaling_percentiles()
         for sample in samples:
             patches, df_patches = self.patch_generator.get_patches(sample)
             if df_patches.empty:
@@ -784,6 +850,7 @@ class Phenocoder:
         confounder_key: str = None,
         n_neighbors: int = 15,
         umap: bool = True,
+        obs_keys: str | list[str] | None = None,
     ) -> None:
         """
         Generate spatial graph embeddings from all samples.
@@ -806,6 +873,12 @@ class Phenocoder:
             n_neighbors (int, optional): Number of neighbors for neighbor graph construction.
                 Used in both bbknn.bbknn and sc.pp.neighbors. Defaults to 15.
             umap (bool, optional): Whether to compute UMAP embedding. Defaults to True.
+            obs_keys (str | list[str] | None, optional): Column name(s) in
+                ``sdata.tables[table_key].obs`` to carry into ``self.adata.obs`` as
+                per-sample metadata (e.g. condition/treatment groups), so the UMAP
+                can be colored by them. Each value is taken per sample via
+                ``groupby(sample_key).first()`` and must be constant within a sample.
+                Defaults to None.
 
         Returns:
             None
@@ -836,6 +909,41 @@ class Phenocoder:
                 'self.adata is None. Run spatialgraph_stats() first to compute '
                 'spatial statistics before generating embeddings.'
             )
+
+        # Carry per-sample metadata (e.g. condition groups) into adata.obs so the
+        # embedding can be inspected/colored by them. spatialgraph_stats builds the
+        # sample-level adata with an empty obs, so these columns are looked up from
+        # the source table and mapped on by sample.
+        if obs_keys is not None:
+            if isinstance(obs_keys, str):
+                obs_keys = [obs_keys]
+            if self.sdata is None or self.table_key is None:
+                raise ValueError(
+                    'obs_keys requires self.sdata and self.table_key to look up '
+                    'per-sample metadata.'
+                )
+            table = self.sdata.tables[self.table_key]
+            if self.sample_key not in table.obs.columns:
+                raise ValueError(
+                    f'sample_key "{self.sample_key}" not found in '
+                    f'sdata.tables["{self.table_key}"].obs'
+                )
+            # per-row sample identifier: the sample_key column if present
+            # (subunit-level adata), otherwise the index (sample-level adata)
+            if self.sample_key in self.adata.obs.columns:
+                sample_ids = self.adata.obs[self.sample_key].astype(str)
+            else:
+                sample_ids = self.adata.obs.index.to_series().astype(str)
+            for key in obs_keys:
+                if key not in table.obs.columns:
+                    raise ValueError(
+                        f'obs_key "{key}" not found in '
+                        f'sdata.tables["{self.table_key}"].obs. '
+                        f'Available columns: {list(table.obs.columns)}'
+                    )
+                mapping = table.obs.groupby(self.sample_key)[key].first()
+                mapping.index = mapping.index.astype(str)
+                self.adata.obs[key] = sample_ids.map(mapping.to_dict()).values
 
         # Store raw data
         self.adata.layers['raw'] = self.adata.X.copy()

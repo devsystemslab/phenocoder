@@ -53,21 +53,27 @@ def plot_latent_space(
     df_labels = pd.DataFrame(
         oh_enc.inverse_transform(conditions), columns=oh_enc.feature_names_in_.tolist()
     )
-    df_labels['z'] = pd.factorize(df_labels['z'])[0]
     z_umap = reducer.fit_transform(z)
-    fig, ax = plt.subplots(ncols=2, figsize=(12, 6))
-    for i, dataset in enumerate(df_labels['dataset'].unique()):
-        ax[0].scatter(
-            z_umap[df_labels['dataset'] == dataset, 0],
-            z_umap[df_labels['dataset'] == dataset, 1],
-            label=dataset,
-            s=0.5,
-        )
-    ax[0].legend()
-    ax[0].set_title('dataset')
-    scatter_z = ax[1].scatter(z_umap[:, 0], z_umap[:, 1], c=df_labels['z'], s=0.5)
-    fig.colorbar(scatter_z, ax=ax[1])
-    ax[1].set_title('z-stack position')
+
+    # one panel per condition the model was trained on (not hardcoded to a
+    # 'dataset'/'z' pair). A 'z' column is shown as a continuous z-stack gradient;
+    # any other condition is shown as discrete groups with a legend.
+    cols = df_labels.columns.tolist()
+    fig, axs = plt.subplots(
+        ncols=len(cols), figsize=(6 * len(cols), 6), squeeze=False
+    )
+    for ax, col in zip(axs.reshape(-1), cols):
+        if col == 'z':
+            codes = pd.factorize(df_labels[col])[0]
+            scatter_z = ax.scatter(z_umap[:, 0], z_umap[:, 1], c=codes, s=0.5)
+            fig.colorbar(scatter_z, ax=ax)
+            ax.set_title('z-stack position')
+        else:
+            for group in df_labels[col].unique():
+                mask = (df_labels[col] == group).values
+                ax.scatter(z_umap[mask, 0], z_umap[mask, 1], label=group, s=0.5)
+            ax.legend()
+            ax.set_title(col)
     plt.tight_layout()
 
     if show:
@@ -113,12 +119,13 @@ def plot_reconstructions(
         z_mean, z_log_var, z = model.encoder.predict(data, batch_size=batch_size)
         pred = model.decoder.predict(z, batch_size=batch_size)
     # sample n_preview images
-    fig, axs = plt.subplots(4, 1, figsize=(10, 20))
+    n_channels = data.shape[-1]
+    fig, axs = plt.subplots(n_channels, 1, figsize=(10, 5 * n_channels), squeeze=False)
     idx = np.random.choice(
         range(data.shape[0]), n_preview, replace=n_preview > data.shape[0]
     )
     for i, ax in enumerate(axs.reshape(-1)):
-        imgs_plot = np.concatenate([data[idx, :, :, 0], pred[idx, :, :, 0]], axis=2)
+        imgs_plot = np.concatenate([data[idx, :, :, i], pred[idx, :, :, i]], axis=2)
         # scale each patch to 0-1
         imgs_plot = np.asarray(
             [np.interp(img, (0, np.percentile(img, 99)), (0, 1)) for img in imgs_plot]
