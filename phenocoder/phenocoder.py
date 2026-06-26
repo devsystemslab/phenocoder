@@ -17,6 +17,20 @@ from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
 from phenocoder.utils import write_training_plots_to_tensorboard
 
 
+def _coerce_stringdtype_uns(adata: ad.AnnData) -> None:
+    """Coerce NumPy ``StringDType`` arrays in ``adata.uns`` to object dtype, in place.
+
+    scanpy stores categorical color palettes (e.g. ``<key>_colors``) in ``uns`` and
+    anndata reads them back as NumPy 2.0 ``StringDType`` arrays (``dtype.kind == 'T'``).
+    Those arrays segfault under ``copy.deepcopy``, which ``AnnData.copy()`` uses when
+    subsetting per sample. Coercing to object dtype is harmless for plotting and
+    serialization and makes the table safe to copy.
+    """
+    for key, val in list(adata.uns.items()):
+        if isinstance(val, np.ndarray) and val.dtype.kind == 'T':
+            adata.uns[key] = np.asarray(val, dtype=object)
+
+
 class Phenocoder:
     """
     A class for performing unsupervised morphometric spatial phenotyping on microscopy image data.
@@ -748,6 +762,9 @@ class Phenocoder:
             raise ValueError(f'Table {table_key} not found in sdata.tables')
 
         adata = self.sdata.tables[table_key]
+        # NumPy StringDType arrays in uns (e.g. scanpy *_colors) crash copy.deepcopy,
+        # which AnnData.copy() uses when subsetting per sample/subunit below.
+        _coerce_stringdtype_uns(adata)
 
         if cluster_key not in adata.obs.columns:
             raise ValueError(
