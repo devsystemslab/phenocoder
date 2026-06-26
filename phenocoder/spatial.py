@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import squidpy as sq
 from scipy.sparse import csr_array
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, QhullError
 from sklearn.neighbors import radius_neighbors_graph
 
 
@@ -29,6 +29,9 @@ class SpatialGraphAnalyzer:
         spatial_key (str): Key in adata.obsm containing spatial coordinates.
         radii (tuple[int]): Tuple of radii (in spatial units) for neighborhood calculations.
         index (str): Identifier for this sample/analysis (used as DataFrame index).
+        stats (set[str]): Stat groups to compute (subset of VALID_STATS); defaults to all.
+        chull_min_nds (int): Minimum nodes per connected component for convex-hull stats.
+        chull_min_degree (int): Minimum node degree before extracting convex-hull components.
         results (dict): Computed statistics, populated after run() is called.
 
     Example:
@@ -43,6 +46,16 @@ class SpatialGraphAnalyzer:
         >>> df_stats = analyzer.to_df()
     """
 
+    #: Stat groups that can be selected via the ``stats`` argument.
+    VALID_STATS = (
+        'interactions',
+        'centrality',
+        'connectivity',
+        'moran_features',
+        'moran_clusters',
+        'chull',
+    )
+
     def __init__(
         self,
         adata: ad.AnnData,
@@ -50,12 +63,27 @@ class SpatialGraphAnalyzer:
         spatial_key: str,
         radii: tuple[int],
         index: str,
+        stats: list[str] | None = None,
+        chull_min_nds: int = 10,
+        chull_min_degree: int = 3,
     ):
         self.adata = adata
         self.cluster_key = cluster_key
         self.spatial_key = spatial_key
         self.radii = radii
         self.index = index
+        self.chull_min_nds = chull_min_nds
+        self.chull_min_degree = chull_min_degree
+        if stats is None:
+            self.stats = set(self.VALID_STATS)
+        else:
+            unknown = set(stats) - set(self.VALID_STATS)
+            if unknown:
+                raise ValueError(
+                    f'Unknown stats {sorted(unknown)}. '
+                    f'Valid options: {list(self.VALID_STATS)}'
+                )
+            self.stats = set(stats)
 
     def get_chull(
         self,
@@ -140,6 +168,15 @@ class SpatialGraphAnalyzer:
         pd.DataFrame
             DataFrame containing convex hull metrics for each connected component.
         """
+        # A 3D convex hull needs at least 4 non-coplanar points; with fewer than 4
+        # nodes per component the hull is degenerate (flat) and ConvexHull may raise
+        # a QhullError. Warn so the user can raise min_nds.
+        if min_nds < 4:
+            print(
+                f'Warning: chull_min_nds={min_nds} is below 4. Convex hulls need at '
+                f'least 4 non-coplanar points; small components may be degenerate and '
+                f'fail. Consider raising chull_min_nds to >= 4.'
+            )
         # get center of mass
         graph_center = self.adata.obsm[self.spatial_key].mean(axis=0)
         adata = self.adata[self.adata.obs[self.cluster_key].isin(clusters)]
@@ -171,7 +208,13 @@ class SpatialGraphAnalyzer:
                 ]
                 if np.any(n_unique):
                     continue
-                chull = ConvexHull(pts_component)
+                # the n_unique check only catches axis-aligned flatness; points can
+                # still be coplanar in 3D, which makes ConvexHull raise QhullError.
+                # skip such degenerate components rather than crashing.
+                try:
+                    chull = ConvexHull(pts_component)
+                except QhullError:
+                    continue
                 center_component = pts_component.mean(axis=0)
                 distance_center = np.linalg.norm(center_component - graph_center)
                 df_component = pd.DataFrame(
@@ -440,7 +483,10 @@ class SpatialGraphAnalyzer:
         radius,
     ) -> dict:
         """
-        Calculate spatial statistics for a sample.
+        Calculate the selected spatial statistics for a sample.
+
+        Only the stat groups in ``self.stats`` are computed (see ``stats`` in the class
+        constructor).
 
         Parameters
         ----------
@@ -449,36 +495,52 @@ class SpatialGraphAnalyzer:
 
         Returns
         -------
-        pd.DataFrame
-            DataFrame containing all spatial statistics for the sample.
+        dict
+            Mapping of stat-group name to its result DataFrame.
         """
         if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
 
         assert len(self.adata.obs[self.cluster_key].unique()) > 1
 
-        sq.gr.spatial_neighbors(
-            self.adata,
-            radius=radius,
-            coord_type='generic',
-            spatial_key=self.spatial_key,
-        )
+        # The neighbor graph (spatial_connectivities) is needed by every stat group
+        # except chull; skip building it if only chull was requested.
+        if self.stats - {'chull'}:
+            sq.gr.spatial_neighbors(
+                self.adata,
+                radius=radius,
+                coord_type='generic',
+                spatial_key=self.spatial_key,
+            )
         clusters = self.adata.obs[self.cluster_key].unique().tolist()
 
-        dict = {
-            'interactions': self.get_interactions(),
-            'centrality': self.get_centrality(),
-            'connectivity': self.get_connectivity(),
-            'moran_features': self.get_moran(),
-            'moran_clusters': self.get_moran_cluster(),
-            'chull_all': self.get_chulls_connected_components(
-                clusters=clusters, radius=radius
-            ),
+        stat_funcs = {
+            'interactions': self.get_interactions,
+            'centrality': self.get_centrality,
+            'connectivity': self.get_connectivity,
+            'moran_features': self.get_moran,
+            'moran_clusters': self.get_moran_cluster,
         }
-        for cluster in clusters:
-            dict[f'chull_cluster:{cluster}'] = self.get_chulls_connected_components(
-                clusters=[cluster], radius=radius
+        dict = {
+            name: func() for name, func in stat_funcs.items() if name in self.stats
+        }
+
+        if 'chull' in self.stats:
+            dict['chull_all'] = self.get_chulls_connected_components(
+                clusters=clusters,
+                radius=radius,
+                min_nds=self.chull_min_nds,
+                min_degree=self.chull_min_degree,
             )
+            for cluster in clusters:
+                dict[f'chull_cluster:{cluster}'] = (
+                    self.get_chulls_connected_components(
+                        clusters=[cluster],
+                        radius=radius,
+                        min_nds=self.chull_min_nds,
+                        min_degree=self.chull_min_degree,
+                    )
+                )
 
         # average all chull dataframes in results and add number of chulls as one column
         for result in [key for key in dict.keys() if 'chull' in key]:

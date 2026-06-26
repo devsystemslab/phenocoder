@@ -2,8 +2,10 @@
 .zed/
 .venv/
 .zed/
+.ruff_cache/
 .ropeproject/
 .pytest_cache/
+.claude/
 uv.lock
 .DS_Store
 */__pycache__/

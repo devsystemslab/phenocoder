@@ -651,10 +651,11 @@ class DatasetLoader:
         self,
         conditions: list[str],
         batch_size: int = 64,
-        dim=(128, 128),
-        n_channels=4,
-        shuffle=True,
-        n_workers=1,
+        dim: tuple[int, int] = (128, 128),
+        n_channels: int = 4,
+        shuffle: bool = True,
+        flip: bool = False,
+        n_workers: int = 1,
     ):
         """
         Build the training and validation Keras Sequence generators.
@@ -694,6 +695,7 @@ class DatasetLoader:
                 dim=dim,
                 n_channels=n_channels,
                 shuffle=shuffle,
+                flip=flip,
                 return_conditions=True,
                 workers=n_workers,
             )
@@ -704,6 +706,7 @@ class DatasetLoader:
                 dim=dim,
                 n_channels=n_channels,
                 shuffle=shuffle,
+                flip=flip,
                 return_conditions=True,
                 workers=n_workers,
             )
