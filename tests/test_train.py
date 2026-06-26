@@ -10,7 +10,13 @@ def test_train():
         dir_dataset='tests/data/tmp',
         spatial_key_index='spatial_index',
     )
-    pheno.initialize_model(n_latent_dim=32, n_dense_dim=64, conditions=['dataset', 'z'])
+    pheno.initialize_model(
+        n_latent_dim=32,
+        n_dense_dim=64,
+        conditions=['dataset', 'z'],
+        flip=True,
+        shuffle=True,
+    )
     pheno.train(n_epochs=3)
     shutil.rmtree('tests/data/tmp')
 

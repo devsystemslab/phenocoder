@@ -250,6 +250,8 @@ class Phenocoder:
         input_shape: tuple[int, ...] = (128, 128, 4),
         conv_layers: tuple[int, ...] = (8, 16, 32, 64, 128),
         beta: float = 0.01,
+        flip: bool = False,
+        shuffle: bool = True,
     ) -> None:
         """
         Initialize a CVAE or conditional CVAE model with specified parameters.
@@ -271,6 +273,8 @@ class Phenocoder:
                 Defaults to (8, 16, 32, 64, 128).
             beta (float, optional): Beta parameter for beta-VAE (controls KL divergence weight).
                 Defaults to 0.01.
+            flip (bool, optional): Whether to flip images horizontally during training. Defaults to False.
+            shuffle (bool, optional): Whether to shuffle the training data. Defaults to True.
 
         Returns:
             None
@@ -336,6 +340,9 @@ class Phenocoder:
                 conditions=conditions,
                 dim=input_shape[:2],
                 n_channels=input_shape[-1],
+                flip=flip,
+                shuffle=shuffle,
+                n_workers=n_workers,
             )
             self.model_config.update(
                 {
@@ -346,7 +353,11 @@ class Phenocoder:
         else:
             self.data_generator_train, self.data_generator_val = (
                 self.data_loader.get_generators(
-                    dim=input_shape[:2], n_channels=input_shape[-1]
+                    dim=input_shape[:2],
+                    n_channels=input_shape[-1],
+                    flip=flip,
+                    shuffle=shuffle,
+                    n_workers=n_workers,
                 )
             )
             self.model_config.update({'conditional': False})
@@ -652,6 +663,9 @@ class Phenocoder:
         spatial_key: str = 'spatial',
         radii: tuple[int, ...] = (25, 50),
         table_key: str | None = None,
+        stats: list[str] | None = None,
+        chull_min_nds: int = 10,
+        chull_min_degree: int = 3,
         use_subunits: bool = False,
         dim_subunit: tuple[int, int, int] = (500, 500, 100),
         min_obs_per_subunit: int = 100,
@@ -674,6 +688,13 @@ class Phenocoder:
                 calculations. Defaults to (25, 50).
             table_key (str | None, optional): Key in sdata.tables to analyze. If None,
                 uses self.table_key. Defaults to None.
+            stats (list[str] | None, optional): Which stat groups to compute. Valid options:
+                'interactions', 'centrality', 'connectivity', 'moran_features',
+                'moran_clusters', 'chull'. If None, all groups are computed. Defaults to None.
+            chull_min_nds (int, optional): Minimum number of nodes per connected component for
+                convex-hull statistics. Only used if 'chull' is in stats. Defaults to 10.
+            chull_min_degree (int, optional): Minimum node degree before extracting convex-hull
+                connected components. Only used if 'chull' is in stats. Defaults to 3.
             use_subunits (bool, optional): Whether to partition samples into spatial
                 subunits and compute statistics per subunit instead of per sample.
                 Defaults to False.
@@ -820,6 +841,9 @@ class Phenocoder:
                             spatial_key=spatial_key,
                             radii=radii,
                             index=subunit_index,
+                            stats=stats,
+                            chull_min_nds=chull_min_nds,
+                            chull_min_degree=chull_min_degree,
                         )
                         sga.run()
                         df_subunit = sga.to_df()
@@ -891,6 +915,9 @@ class Phenocoder:
                         spatial_key=spatial_key,
                         radii=radii,
                         index=str(sample),
+                        stats=stats,
+                        chull_min_nds=chull_min_nds,
+                        chull_min_degree=chull_min_degree,
                     )
                     sga.run()
                     df_sample = sga.to_df()
