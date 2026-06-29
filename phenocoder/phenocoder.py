@@ -1171,4 +1171,4 @@ class Phenocoder:
             sc.pp.neighbors(self.adata, n_neighbors=n_neighbors, use_rep='X_pca')
 
         if umap:
-            sc.tl.umap(self.adata, n_components=2)
+            sc.tl.umap(self.adata, n_components=2, min_dist=0.1)
