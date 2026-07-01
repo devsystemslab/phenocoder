@@ -1,6 +1,6 @@
 # Phenocoder
 
-A deep learning library for unsupervised morphometric spatial phenotyping of microscopy image data.
+A machine-learning framework that combines conditional variational autoencoders with spatial graph analysis to learn unsupervised phenotypic embeddings of complex tissue architectures from microscopy images.
 
 ## Overview
 
@@ -42,11 +42,15 @@ full workflow on top of it:
 ## Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/devsystemslab/phenocoder.git
+cd phenocoder
+
 # Install with uv (recommended)
-uv pip install -e .
+uv pip install .
 
 # Or with pip
-pip install -e .
+pip install .
 ```
 
 ## Requirements
@@ -99,10 +103,9 @@ pheno.train(n_epochs=10)
 pheno.encode(spatial_key_index="spatial_index", spatial_message_passing_radius=50)
 
 # 5. Cluster the latents (standard scanpy), then compute spatial graph statistics
-table = pheno.sdata.tables["phenocoder"]
-sc.pp.pca(table)
-sc.pp.neighbors(table)
-sc.tl.leiden(table, resolution=0.5)
+sc.pp.pca(pheno.sdata.tables["phenocoder"])
+sc.pp.neighbors(pheno.sdata.tables["phenocoder"])
+sc.tl.leiden(pheno.sdata.tables["phenocoder"], resolution=0.5)
 
 pheno.spatialgraph_stats(
     cluster_key="leiden",
@@ -140,6 +143,51 @@ pheno.spatialgraph_stats(
     use_subunits=True,
     dim_subunit=(200, 200, 200),
     min_obs_per_subunit=10,
+)
+```
+
+### Standalone spatial graph analysis
+
+The spatial graph analysis does **not** depend on the CVAE. `spatialgraph_stats` runs on any
+table in the `SpatialData` object that has spatial coordinates in `.obsm` and a categorical
+label column in `.obs` — the labels can come from any source (Phenocoder latents, Leiden
+clustering of the raw morphometric features, marker-based cell-type annotations, manual regions,
+…). This lets you run the spatial statistics on their own, without training a model:
+
+```python
+import scanpy as sc
+from phenocoder import Phenocoder
+
+pheno = Phenocoder(table_key="nuclei_features", sample_key="well", image_key="IF")
+pheno.add_sdata(sdata)
+
+# Cluster the raw feature table directly (no CVAE involved).
+adata = pheno.sdata.tables["nuclei_features"]
+sc.pp.scale(adata)
+sc.pp.pca(adata)
+sc.pp.neighbors(adata)
+sc.tl.leiden(adata, resolution=0.05)
+
+# Run the spatial statistics on those labels
+pheno.spatialgraph_stats(
+    cluster_key="leiden",          # any categorical .obs column
+    spatial_key="spatial",         # coordinates in .obsm
+    radii=(25, 50),
+    table_key="nuclei_features",   # any table in sdata.tables
+)
+```
+
+By default every stat group is computed. Pass `stats=[...]` to select a subset — valid groups
+are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters` and
+`chull`:
+
+```python
+pheno.spatialgraph_stats(
+    cluster_key="leiden",
+    spatial_key="spatial",
+    radii=(25, 50),
+    table_key="nuclei_features",
+    stats=["interactions", "connectivity"],  # only these groups
 )
 ```
 
@@ -201,8 +249,17 @@ assumptions (noted in their docstrings) that are being generalized.
 
 ## License
 
-[Add license information]
+Released under the [MIT License](LICENSE). Copyright (c) 2026 DevSystems Lab.
 
 ## Citation
 
-[Add citation information if applicable]
+If you use Phenocoder in your research, please cite this repository:
+
+```bibtex
+@software{phenocoder,
+  author  = {DevSystems Lab},
+  title   = {Phenocoder: unsupervised phenotypic embedding of tissue architectures via conditional variational autoencoders and spatial graph analysis},
+  year    = {2026},
+  url     = {https://github.com/devsystemslab/phenocoder}
+}
+```

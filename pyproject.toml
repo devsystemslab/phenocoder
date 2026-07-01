@@ -1,7 +1,7 @@
 [project]
 name = "phenocoder"
 version = "0.1.0"
-description = "Add your description here"
+description = "A machine-learning framework that combines conditional variational autoencoders with spatial graph analysis to learn unsupervised phenotypic embeddings of complex tissue architectures from microscopy images."
 requires-python = ">=3.10, <3.13"
 dependencies = [
     # Linux: full CUDA stack

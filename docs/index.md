@@ -1,7 +1,8 @@
 # Phenocoder
 
-A deep learning library for **unsupervised morphometric spatial phenotyping** of microscopy
-image data.
+A machine-learning framework that combines **conditional variational autoencoders** with
+**spatial graph analysis** to learn unsupervised phenotypic embeddings of complex tissue
+architectures from microscopy images.
 
 Phenocoder learns compressed morphological representations of cells/nuclei directly from
 microscopy images using (conditional) convolutional variational autoencoders, then analyzes
