@@ -257,7 +257,7 @@ If you use Phenocoder in your research, please cite this repository:
 
 ```bibtex
 @software{phenocoder,
-  author  = {DevSystems Lab},
+  author  = {Christoph Harmel},
   title   = {Phenocoder: unsupervised phenotypic embedding of tissue architectures via conditional variational autoencoders and spatial graph analysis},
   year    = {2026},
   url     = {https://github.com/devsystemslab/phenocoder}
