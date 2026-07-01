@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import anndata as ad
 import numpy as np
 import pandas as pd
@@ -19,7 +21,7 @@ class SpatialSubunitSampler:
         self.verbose = verbose
         self.subunits = None
 
-    def partition(self):
+    def partition(self) -> None:
         """
         Partition the observations into a uniform grid of cubic spatial subunits.
 
@@ -83,12 +85,12 @@ class SpatialSubunitSampler:
                 self.subunits[subunit_key]['obs_spatial']
             )
 
-    def filter(self):
+    def filter(self) -> None:
         """
-        Filter subunits based on minimum number of observations
+        Filter subunits based on minimum number of observations.
 
-        Args:
-            min_obs (int): Minimum number of observations required
+        Drops any subunit with fewer than ``self.min_obs`` observations (the
+        threshold set at construction).
 
         Returns:
             None
@@ -99,22 +101,19 @@ class SpatialSubunitSampler:
             if len(subunit_data['obs_indices']) >= self.min_obs
         }
 
-    def sample(self, max_obs: int):
+    def sample(self, max_obs: int | None) -> None:
         """
         Sample observations within each subunit based on max_obs threshold.
 
         Randomly subsamples observations in subunits that exceed the max_obs threshold.
         Subunits with fewer observations than max_obs are left unchanged.
 
-        Parameters
-        ----------
-        max_obs : int
-            Maximum number of observations per subunit. Subunits exceeding this
-            threshold will be randomly subsampled to this size.
+        Args:
+            max_obs (int): Maximum number of observations per subunit. Subunits exceeding this
+                threshold will be randomly subsampled to this size.
 
-        Returns
-        -------
-        None
+        Returns:
+            None
         """
         self.max_obs = max_obs
         if self.max_obs is None:
@@ -145,7 +144,17 @@ class SpatialSubunitSampler:
         """Random subsampling"""
         return np.random.choice(n_points, n_samples, replace=False)
 
-    def to_df(self):
+    def to_df(self) -> pd.DataFrame:
+        """
+        Build a per-observation table mapping each object to its spatial subunit.
+
+        Flattens ``self.subunits`` into one row per observation, with the subunit
+        assignment as a column and the observation index as the (string) index.
+
+        Returns:
+            pd.DataFrame: One row per observation, with a ``subunit_id`` column and
+                the observation index (``obs_index``) as the DataFrame index.
+        """
         # Pre-calculate total number of rows
         total_obs = sum(len(data['obs_indices']) for data in self.subunits.values())
 

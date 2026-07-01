@@ -6,8 +6,10 @@ requires-python = ">=3.10, <3.13"
 dependencies = [
     # Linux: full CUDA stack
     "tensorflow[and-cuda]>=2.19.0; sys_platform == 'linux'",
-    # macOS (and any non-Linux): plain TF, no CUDA
-    "tensorflow>=2.19.0; sys_platform != 'linux'",
+    # macOS (and any non-Linux): plain TF, no CUDA. Capped at <2.20 because
+    # tensorflow-metal 1.2.0 (latest) only supports TF up to 2.19/2.20 — newer
+    # TF breaks the Metal plugin load on macOS.
+    "tensorflow>=2.19.0,<2.20; sys_platform != 'linux'",
     # Mac GPU acceleration via Metal
     "tensorflow-metal>=1.2.0; sys_platform == 'darwin'",
     "keras",

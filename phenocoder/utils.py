@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import io
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,10 +11,21 @@ import tensorflow as tf
 import umap
 from skimage.util import montage
 
+if TYPE_CHECKING:
+    from sklearn.preprocessing import OneHotEncoder
+
+    from phenocoder.generator import SequenceGenerator
+    from phenocoder.model import CVAE, CondCVAE
+
 
 def plot_latent_space(
-    model, generator, oh_enc, sample_frac=1, show=True, return_fig=False
-):
+    model: "CVAE | CondCVAE",
+    generator: "SequenceGenerator",
+    oh_enc: "OneHotEncoder",
+    sample_frac: float = 1,
+    show: bool = True,
+    return_fig: bool = False,
+) -> plt.Figure | None:
     """
     Plot UMAP visualization of the latent space colored by dataset and z-position.
 
@@ -29,10 +44,7 @@ def plot_latent_space(
     Returns:
         matplotlib.figure.Figure or None: Figure object if return_fig=True, otherwise None.
 
-    Note:
-        TODO: generalize plotting function -> add argument for conditions to plot.
     """
-    # TODO: generalize plotting function -> add argument for conditions to plot.
     reducer = umap.UMAP()
     n_samples = int(sample_frac * len(generator))
     if n_samples == 0:
@@ -59,9 +71,7 @@ def plot_latent_space(
     # 'dataset'/'z' pair). A 'z' column is shown as a continuous z-stack gradient;
     # any other condition is shown as discrete groups with a legend.
     cols = df_labels.columns.tolist()
-    fig, axs = plt.subplots(
-        ncols=len(cols), figsize=(6 * len(cols), 6), squeeze=False
-    )
+    fig, axs = plt.subplots(ncols=len(cols), figsize=(6 * len(cols), 6), squeeze=False)
     for ax, col in zip(axs.reshape(-1), cols):
         if col == 'z':
             codes = pd.factorize(df_labels[col])[0]
@@ -83,8 +93,13 @@ def plot_latent_space(
 
 
 def plot_reconstructions(
-    model, generator, n_preview=200, batch_size=64, show=True, return_fig=False
-):
+    model: "CVAE | CondCVAE",
+    generator: "SequenceGenerator",
+    n_preview: int = 200,
+    batch_size: int = 64,
+    show: bool = True,
+    return_fig: bool = False,
+) -> plt.Figure | None:
     """
     Plot side-by-side comparison of input images and their VAE reconstructions.
 
@@ -139,7 +154,7 @@ def plot_reconstructions(
         return fig
 
 
-def plot_to_image(figure):
+def plot_to_image(figure: plt.Figure) -> tf.Tensor:
     """
     Convert a matplotlib figure to a TensorFlow image tensor.
 
@@ -168,13 +183,13 @@ def plot_to_image(figure):
 
 
 def write_training_plots_to_tensorboard(
-    model,
-    data_generator_train,
-    model_oh_enc,
-    dir_tensorboard,
-    n_preview=300,
-    plot_frac=0.001,
-):
+    model: "CVAE | CondCVAE",
+    data_generator_train: "SequenceGenerator",
+    model_oh_enc: "OneHotEncoder",
+    dir_tensorboard: Path | str,
+    n_preview: int = 300,
+    plot_frac: float = 0.001,
+) -> None:
     """
     Write training visualization plots to TensorBoard.
 

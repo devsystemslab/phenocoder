@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
@@ -186,14 +188,14 @@ class Phenocoder:
 
     def generate_dataset(
         self,
-        dataset,
-        dir_dataset,
-        patch_size=(128, 128),
-        spatial_key_index=None,
-        scale=True,
-        metadata_keys=None,
-        scale_percentile=1,
-        scale_per_sample=True,
+        dataset: str,
+        dir_dataset: str | Path,
+        patch_size: tuple[int, int] = (128, 128),
+        spatial_key_index: str | None = None,
+        scale: bool = True,
+        metadata_keys: list[str] | None = None,
+        scale_percentile: float = 1,
+        scale_per_sample: bool = True,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -558,7 +560,7 @@ class Phenocoder:
         scale_percentile: int = 1,
         scale_per_sample: bool = True,
         spatial_message_passing_radius: int = None,
-    ) -> ad.AnnData:
+    ) -> None:
         """
         Encode nuclei patches into latent space representations using the trained model.
 

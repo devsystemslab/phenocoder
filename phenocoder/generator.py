@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np
@@ -32,33 +34,22 @@ class PatchGenerator:
         """
         Initialize PatchGenerator.
 
-        Parameters
-        ----------
-        sdata : SpatialData
-            Spatial data object containing images and tables
-        image_key : str
-            Key prefix for accessing images in sdata.images (images are read per sample
-            as ``f"{image_key}_{sample}"``)
-        spatial_key : str
-            Key in ``sdata.tables[table_key].obsm`` holding the (y, x, z) coordinates used
-            to center patches
-        table_key : str
-            Key for accessing the object table in sdata.tables
-        sample_key : str
-            obs column used for sample identification
-        scale : bool
-            Whether patches are intensity-scaled using the computed percentiles
-        patch_size : tuple of int, default (128, 128)
-            Patch (height, width) extracted around each object
-        metadata_keys : list of str, optional
-            Additional columns from ``sdata.tables[table_key].obs`` to copy into the
-            patches dataframe (and ``patches.csv``)
-        scale_percentile : float, default 1
-            Percentile (in 0-100) used when computing each slice's low/high in the
-            image statistics
-        scale_per_sample : bool, default True
-            If True, aggregate the per-slice percentiles per (sample, channel) so each
-            sample is normalized to its own range; if False, aggregate globally per channel
+        Args:
+            sdata (SpatialData): Spatial data object containing images and tables
+            image_key (str): Key prefix for accessing images in sdata.images (images are read per sample
+                as ``f"{image_key}_{sample}"``)
+            spatial_key (str): Key in ``sdata.tables[table_key].obsm`` holding the (y, x, z) coordinates used
+                to center patches
+            table_key (str): Key for accessing the object table in sdata.tables
+            sample_key (str): obs column used for sample identification
+            scale (bool): Whether patches are intensity-scaled using the computed percentiles
+            patch_size (tuple of int): Patch (height, width) extracted around each object. Defaults to (128, 128).
+            metadata_keys (list of str, optional): Additional columns from ``sdata.tables[table_key].obs`` to copy into the
+                patches dataframe (and ``patches.csv``)
+            scale_percentile (float): Percentile (in 0-100) used when computing each slice's low/high in the
+                image statistics. Defaults to 1.
+            scale_per_sample (bool): If True, aggregate the per-slice percentiles per (sample, channel) so each
+                sample is normalized to its own range; if False, aggregate globally per channel. Defaults to True.
         """
         self.sdata = sdata
         self.image_key = image_key
@@ -87,7 +78,7 @@ class PatchGenerator:
         self.sample_percentiles_low = None
         self.sample_percentiles_high = None
 
-    def init_patches(self):
+    def init_patches(self) -> None:
         """
         Initialize patch positions from spatial coordinates.
 
@@ -142,21 +133,16 @@ class PatchGenerator:
         self,
         img: np.ndarray,
         id: int,
-    ):
+    ) -> np.ndarray:
         """
         Extract a patch from an image centered on specified coordinates.
 
-        Parameters
-        ----------
-        img : ndarray
-            Input image array
-        id : int
-            Batch ID corresponding to patch position
+        Args:
+            img (ndarray): Input image array
+            id (int): Batch ID corresponding to patch position
 
-        Returns
-        -------
-        ndarray
-            Extracted image patch
+        Returns:
+            ndarray: Extracted image patch
         """
         # extract patch centered on x and y
         x = int(self.patches[self.patches['id'] == id]['x'].iloc[0])
@@ -194,22 +180,15 @@ class PatchGenerator:
         """
         Calculate comprehensive statistics for image data.
 
-        Parameters
-        ----------
-        imgs : ndarray
-            Input image array
-        id : str
-            Identifier for the image/patch
-        id_name : str
-            Name of the ID column
-        percentile : float, optional
-            Percentile (0-100) for the low/high columns; the high uses
-            ``100 - percentile``. Defaults to ``self.scale_percentile``.
+        Args:
+            imgs (ndarray): Input image array
+            id (str): Identifier for the image/patch
+            id_name (str): Name of the ID column
+            percentile (float, optional): Percentile (0-100) for the low/high columns; the high uses
+                ``100 - percentile``. Defaults to ``self.scale_percentile``.
 
-        Returns
-        -------
-        DataFrame
-            Statistics for each channel including mean, std, quantiles, etc.
+        Returns:
+            DataFrame: Statistics for each channel including mean, std, quantiles, etc.
         """
         if percentile is None:
             percentile = self.scale_percentile
@@ -248,14 +227,12 @@ class PatchGenerator:
 
         return df
 
-    def generate_image_stats(self, sample_id: str):
+    def generate_image_stats(self, sample_id: str) -> None:
         """
         Generate statistics for all patches in a sample.
 
-        Parameters
-        ----------
-        sample_id : str or int
-            Sample identifier for which to generate statistics
+        Args:
+            sample_id (str or int): Sample identifier for which to generate statistics
         """
 
         df_patch_positions = self.patches[self.patches[self.sample_key] == sample_id]
@@ -265,21 +242,16 @@ class PatchGenerator:
             df_stat = self.__get_image_stats__(imgs, sample_id, 'sample_id')
             self.df_stats = pd.concat([self.df_stats, df_stat])
 
-    def select_patches(self, sample_id: str):
+    def select_patches(self, sample_id: str) -> tuple[pd.DataFrame, np.ndarray]:
         """
         Select all patches of a given sample.
 
-        Parameters
-        ----------
-        sample_id : str or int
-            Sample identifier for which to select patches
+        Args:
+            sample_id (str or int): Sample identifier for which to select patches
 
-        Returns
-        -------
-        df_patches_sample : pd.DataFrame
-            DataFrame containing patch information
-        img : np.ndarray
-            Image array
+        Returns:
+            df_patches_sample (pd.DataFrame): DataFrame containing patch information
+            img (np.ndarray): Image array
         """
         # get all files that need to be written
         df_patches_sample = self.patches[self.patches[self.sample_key] == sample_id]
@@ -297,34 +269,27 @@ class PatchGenerator:
             self.percentiles_high = self.sample_percentiles_high[sample_id].copy()
         return df_patches_sample, img
 
-    def write_patches(self, sample_id: str):
+    def write_patches(self, sample_id: str) -> None:
         """
         Write all patches of a given samples to disk as numpy arrays.
 
-        Parameters
-        ----------
-        sample_id : str or int
-            Sample identifier for which to write patches
+        Args:
+            sample_id (str or int): Sample identifier for which to write patches
         """
         df_patches_sample, img = self.select_patches(sample_id)
         for id, file in zip(df_patches_sample['id'], df_patches_sample['file']):
             np.save(Path(self.dir_dataset, file), self.extract_patch(img, id))
 
-    def get_patches(self, sample_id: str):
+    def get_patches(self, sample_id: str) -> tuple[np.ndarray, pd.DataFrame]:
         """
         Return all patches of a given sample.
 
-        Parameters
-        ----------
-        sample_id : str or int
-            Sample identifier for which to retrieve patches
+        Args:
+            sample_id (str or int): Sample identifier for which to retrieve patches
 
-        Returns
-        -------
-        list of np.ndarray
-            List of patches as numpy arrays
-        pd.DataFrame
-            DataFrame containing patch information
+        Returns:
+            list of np.ndarray: List of patches as numpy arrays
+            pd.DataFrame: DataFrame containing patch information
         """
         df_patches_sample, img = self.select_patches(sample_id)
         patches = np.asarray(
@@ -332,7 +297,7 @@ class PatchGenerator:
         )
         return np.moveaxis(patches, 1, -1), df_patches_sample
 
-    def get_scaling_percentiles(self):
+    def get_scaling_percentiles(self) -> None:
         """
         Extract and set scaling percentiles from computed statistics.
 
@@ -349,10 +314,8 @@ class PatchGenerator:
           (the original global behaviour). Stored directly in ``percentiles_low`` /
           ``percentiles_high``.
 
-        Raises
-        ------
-        ValueError
-            If statistics have not been computed yet (df_stats is None or empty)
+        Raises:
+            ValueError: If statistics have not been computed yet (df_stats is None or empty)
         """
         if self.df_stats is None or self.df_stats.empty:
             raise ValueError('Statistics not computed yet')
@@ -383,20 +346,15 @@ class PatchGenerator:
         dir_output: str,
         n_samples: int = None,
         n_patches: int = None,
-    ):
+    ) -> None:
         """
         Generate complete dataset with patches and statistics.
 
-        Parameters
-        ----------
-        dataset : str
-            Name/identifier for the dataset being generated
-        dir_output : str
-            Directory path for storing the generated dataset
-        n_samples : int, optional
-            Number of samples to randomly select for processing. If None, processes all samples.
-        n_patches : int, optional
-            Number of patches to randomly sample from all available patches. If None, uses all patches.
+        Args:
+            dataset (str): Name/identifier for the dataset being generated
+            dir_output (str): Directory path for storing the generated dataset
+            n_samples (int, optional): Number of samples to randomly select for processing. If None, processes all samples.
+            n_patches (int, optional): Number of patches to randomly sample from all available patches. If None, uses all patches.
         """
         self.dir_output = Path(dir_output)
         self.dir_dataset = Path(dir_output, dataset)
@@ -436,39 +394,29 @@ class SequenceGenerator(Sequence):
     def __init__(
         self,
         ids: list,
-        batch_size=32,
-        dim=(128, 128),
-        n_channels=4,
-        shuffle=True,
-        flip=False,
-        conditions=None,
-        return_conditions=False,
+        batch_size: int = 32,
+        dim: tuple = (128, 128),
+        n_channels: int = 4,
+        shuffle: bool = True,
+        flip: bool = False,
+        conditions: np.ndarray | None = None,
+        return_conditions: bool = False,
         **kwargs,
     ):
         """
         Initialize SequenceGenerator.
 
-        Parameters
-        ----------
-        ids : list
-            List of file paths for patches to load
-        batch_size : int, default 32
-            Number of patches per batch
-        dim : tuple, default (128, 128)
-            Spatial dimensions of patches
-        n_channels : int, default 4
-            Number of channels in patches
-        shuffle : bool, default True
-            Whether to shuffle patch order each epoch
-        flip : bool, default False
-            Whether to apply random horizontal/vertical flipping augmentation
-        conditions : array-like, optional
-            One-hot encoded condition labels for conditional generation. If provided, each
-            batch is returned as ``(patches, conditions)``
-        return_conditions : bool, default False
-            Accepted for API symmetry; conditions are returned whenever ``conditions`` is set
-        **kwargs
-            Additional arguments passed to parent Sequence class
+        Args:
+            ids (list): List of file paths for patches to load
+            batch_size (int): Number of patches per batch. Defaults to 32.
+            dim (tuple): Spatial dimensions of patches. Defaults to (128, 128).
+            n_channels (int): Number of channels in patches. Defaults to 4.
+            shuffle (bool): Whether to shuffle patch order each epoch. Defaults to True.
+            flip (bool): Whether to apply random horizontal/vertical flipping augmentation. Defaults to False.
+            conditions (array-like, optional): One-hot encoded condition labels for conditional generation. If provided, each
+                batch is returned as ``(patches, conditions)``
+            return_conditions (bool): Accepted for API symmetry; conditions are returned whenever ``conditions`` is set. Defaults to False.
+            **kwargs: Additional arguments passed to parent Sequence class
         """
         super().__init__(**kwargs)
         self.indexes = None
@@ -485,10 +433,8 @@ class SequenceGenerator(Sequence):
         """
         Get number of batches per epoch.
 
-        Returns
-        -------
-        int
-            Number of batches that fit in the dataset
+        Returns:
+            int: Number of batches that fit in the dataset
         """
         return int(np.floor(len(self.ids) / self.batch_size))
 
@@ -496,15 +442,11 @@ class SequenceGenerator(Sequence):
         """
         Generate one batch of data.
 
-        Parameters
-        ----------
-        index : int
-            Batch index
+        Args:
+            index (int): Batch index
 
-        Returns
-        -------
-        ndarray or tuple
-            Batch of patches, optionally with conditions
+        Returns:
+            ndarray or tuple: Batch of patches, optionally with conditions
         """
         indexes = self.indexes[index * self.batch_size : (index + 1) * self.batch_size]
         ids_temp = [self.ids[k] for k in indexes]
@@ -539,15 +481,11 @@ class SequenceGenerator(Sequence):
         """
         Generate batch data by loading patches from disk.
 
-        Parameters
-        ----------
-        list_ids_temp : list
-            List of file paths for the current batch
+        Args:
+            ids_temp (list): List of file paths for the current batch
 
-        Returns
-        -------
-        ndarray
-            Batch of loaded image patches
+        Returns:
+            ndarray: Batch of loaded image patches
         """
         # Initialization
         X = np.empty((self.batch_size, *self.dim, self.n_channels))
@@ -571,14 +509,10 @@ class DatasetLoader:
         """
         Initialize DatasetLoader.
 
-        Parameters
-        ----------
-        datasets : list
-            List of dataset names to merge
-        dir_datasets : str
-            Base directory containing dataset subdirectories
-        sample_key : str
-            obs column used to group patches into samples for the train/val split
+        Args:
+            datasets (list): List of dataset names to merge
+            dir_datasets (str): Base directory containing dataset subdirectories
+            sample_key (str): obs column used to group patches into samples for the train/val split
         """
         self.dir_datasets = dir_datasets
         self.datasets = datasets
@@ -586,7 +520,7 @@ class DatasetLoader:
         self.stats_imgs = None
         self.patches = None
 
-    def load_datasets(self):
+    def load_datasets(self) -> None:
         """
         Loads and merge statistics from all specified datasets.
 
@@ -605,7 +539,7 @@ class DatasetLoader:
         self.stats = pd.concat(self.stats)
         self.patches = pd.concat(self.patches)
 
-    def set_train_val_split(self, batch_size=64, split: float = 0.8):
+    def set_train_val_split(self, batch_size: int = 64, split: float = 0.8) -> None:
         """
         Assign each patch to a train or validation split.
 
@@ -613,12 +547,9 @@ class DatasetLoader:
         patches of a sample land in the same split, then each split is truncated to a whole
         number of batches. Adds ``split`` and ``file_path`` columns to ``self.patches``.
 
-        Parameters
-        ----------
-        batch_size : int, default 64
-            Batch size used to drop the remainder so each split is batch-aligned
-        split : float, default 0.8
-            Fraction of samples assigned to the training split
+        Args:
+            batch_size (int): Batch size used to drop the remainder so each split is batch-aligned. Defaults to 64.
+            split (float): Fraction of samples assigned to the training split. Defaults to 0.8.
         """
         self.load_datasets()
         self.patches = self.patches.sample(frac=1, random_state=42, replace=False)
@@ -656,34 +587,25 @@ class DatasetLoader:
         shuffle: bool = True,
         flip: bool = False,
         n_workers: int = 1,
-    ):
+    ) -> tuple:
         """
         Build the training and validation Keras Sequence generators.
 
         Requires ``set_train_val_split`` to have been called (patches must have ``split`` and
         ``file_path`` columns).
 
-        Parameters
-        ----------
-        conditions : list of str
-            obs/patch columns to one-hot encode and feed as conditions. If empty, plain
-            (non-conditional) generators are returned
-        batch_size : int, default 64
-            Number of patches per batch
-        dim : tuple, default (128, 128)
-            Spatial (height, width) of patches
-        n_channels : int, default 4
-            Number of image channels
-        shuffle : bool, default True
-            Whether to shuffle patch order each epoch
-        n_workers : int, default 1
-            Number of worker processes for the Keras Sequence
+        Args:
+            conditions (list of str): obs/patch columns to one-hot encode and feed as conditions. If empty, plain
+                (non-conditional) generators are returned
+            batch_size (int): Number of patches per batch. Defaults to 64.
+            dim (tuple): Spatial (height, width) of patches. Defaults to (128, 128).
+            n_channels (int): Number of image channels. Defaults to 4.
+            shuffle (bool): Whether to shuffle patch order each epoch. Defaults to True.
+            n_workers (int): Number of worker processes for the Keras Sequence. Defaults to 1.
 
-        Returns
-        -------
-        tuple
-            ``(train_generator, val_generator, one_hot_encoder)`` if ``conditions`` is non-empty,
-            otherwise ``(train_generator, val_generator)``
+        Returns:
+            tuple: ``(train_generator, val_generator, one_hot_encoder)`` if ``conditions`` is non-empty,
+                otherwise ``(train_generator, val_generator)``
         """
         if conditions:
             enc = OneHotEncoder()

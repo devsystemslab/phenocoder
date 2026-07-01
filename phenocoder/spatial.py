@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import anndata as ad
 import networkx as nx
 import numpy as np
@@ -95,17 +97,12 @@ class SpatialGraphAnalyzer:
 
         Operates on ``self.adata`` (uses the 'z', 'centroid-0', 'centroid-1' obs columns).
 
-        Parameters
-        ----------
-        radius : int, default 100
-            Radius for neighbor graph construction.
-        degree_threshold : int, default 5
-            Minimum degree threshold for filtering points.
+        Args:
+            radius (int): Radius for neighbor graph construction. Defaults to 100.
+            degree_threshold (int): Minimum degree threshold for filtering points. Defaults to 5.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing convex hull volume, area, and density metrics.
+        Returns:
+            pd.DataFrame: DataFrame containing convex hull volume, area, and density metrics.
         """
         coordinate_cols = ['z', 'centroid-0', 'centroid-1']
         df = self.adata.obs[coordinate_cols]
@@ -147,26 +144,19 @@ class SpatialGraphAnalyzer:
         return df_results
 
     def get_chulls_connected_components(
-        self, clusters: list, radius: int = 100, min_nds=10, min_degree=3
+        self, clusters: list, radius: int = 100, min_nds: int = 10, min_degree: int = 4
     ) -> pd.DataFrame:
         """
         Calculate convex hull for connected components in subset of spatial graph.
 
-        Parameters
-        ----------
-        clusters : list
-            List of cluster identifiers to include (matched against self.cluster_key).
-        radius : int, default 100
-            Radius for neighbor graph construction.
-        min_nds : int, default 10
-            Minimum number of nodes for connected components.
-        min_degree : int, default 3
-            Drop nodes with fewer than this many connections before extracting components.
+        Args:
+            clusters (list): List of cluster identifiers to include (matched against self.cluster_key).
+            radius (int): Radius for neighbor graph construction. Defaults to 100.
+            min_nds (int): Minimum number of nodes for connected components. Defaults to 10.
+            min_degree (int): Drop nodes with fewer than this many connections before extracting components. Defaults to 3.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing convex hull metrics for each connected component.
+        Returns:
+            pd.DataFrame: DataFrame containing convex hull metrics for each connected component.
         """
         # A 3D convex hull needs at least 4 non-coplanar points; with fewer than 4
         # nodes per component the hull is degenerate (flat) and ConvexHull may raise
@@ -246,11 +236,9 @@ class SpatialGraphAnalyzer:
         Computes both normalized and raw cluster-cluster interaction counts on
         ``self.adata`` (requires spatial neighbors to have been computed).
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing normalized and raw interaction counts, one row indexed
-            by self.index.
+        Returns:
+            pd.DataFrame: DataFrame containing normalized and raw interaction counts, one row indexed
+                by self.index.
         """
 
         # interaction matrix
@@ -295,11 +283,9 @@ class SpatialGraphAnalyzer:
         Operates on ``self.adata.var`` features using the precomputed
         ``spatial_connectivities``; returns zeros if the graph has no edges.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing Moran's I values for each feature, one row indexed
-            by self.index.
+        Returns:
+            pd.DataFrame: DataFrame containing Moran's I values for each feature, one row indexed
+                by self.index.
         """
         adata = self.adata.copy()
         if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
@@ -327,11 +313,9 @@ class SpatialGraphAnalyzer:
         One-hot encodes ``self.cluster_key`` and computes Moran's I per cluster using the
         precomputed ``spatial_connectivities``; returns zeros if the graph has no edges.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing Moran's I values for each cluster, one row indexed
-            by self.index.
+        Returns:
+            pd.DataFrame: DataFrame containing Moran's I values for each cluster, one row indexed
+                by self.index.
         """
         # one hot encode cluster labels
         df = pd.get_dummies(self.adata.obs[self.cluster_key]).astype(int)
@@ -364,11 +348,9 @@ class SpatialGraphAnalyzer:
         Computes pairwise centrality scores that measure how central each cluster
         is relative to other clusters in the spatial graph.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame containing centrality scores for each cluster pair, with one row
-            indexed by self.index and columns named 'centrality_{from}_{to}'.
+        Returns:
+            pd.DataFrame: DataFrame containing centrality scores for each cluster pair, with one row
+                indexed by self.index and columns named 'centrality_{from}_{to}'.
         """
         # centrality scores
         sq.gr.centrality_scores(
@@ -399,14 +381,12 @@ class SpatialGraphAnalyzer:
         Computes the mean and standard deviation of node degrees (number of neighbors)
         both globally and per cluster.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with one row indexed by self.index containing:
-            - 'mean': Mean degree across all nodes
-            - 'std': Standard deviation of degree across all nodes
-            - 'mean_degree_{cluster}': Mean degree for each cluster
-            - 'std_degree_{cluster}': Standard deviation of degree for each cluster
+        Returns:
+            pd.DataFrame: DataFrame with one row indexed by self.index containing:
+                - 'mean': Mean degree across all nodes
+                - 'std': Standard deviation of degree across all nodes
+                - 'mean_degree_{cluster}': Mean degree for each cluster
+                - 'std_degree_{cluster}': Standard deviation of degree for each cluster
         """
         # get mean connectivity
         degrees = self.adata.obsp['spatial_connectivities'].sum(axis=0)
@@ -459,13 +439,11 @@ class SpatialGraphAnalyzer:
 
         Computes the number of cells in each cluster and the total number of cells.
 
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with one row indexed by self.index containing:
-            - 'cluster': Cluster label
-            - 'count': Number of cells in the cluster
-            - 'total': Total number of cells across all clusters
+        Returns:
+            pd.DataFrame: DataFrame with one row indexed by self.index containing:
+                - 'cluster': Cluster label
+                - 'count': Number of cells in the cluster
+                - 'total': Total number of cells across all clusters
         """
         df_counts = (
             self.adata.obs.groupby(self.cluster_key)
@@ -480,7 +458,7 @@ class SpatialGraphAnalyzer:
 
     def get_spatial_stats(
         self,
-        radius,
+        radius: int,
     ) -> dict:
         """
         Calculate the selected spatial statistics for a sample.
@@ -488,15 +466,11 @@ class SpatialGraphAnalyzer:
         Only the stat groups in ``self.stats`` are computed (see ``stats`` in the class
         constructor).
 
-        Parameters
-        ----------
-        radius : int
-            Radius for spatial neighbor calculations.
+        Args:
+            radius (int): Radius for spatial neighbor calculations.
 
-        Returns
-        -------
-        dict
-            Mapping of stat-group name to its result DataFrame.
+        Returns:
+            dict: Mapping of stat-group name to its result DataFrame.
         """
         if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
@@ -521,9 +495,7 @@ class SpatialGraphAnalyzer:
             'moran_features': self.get_moran,
             'moran_clusters': self.get_moran_cluster,
         }
-        dict = {
-            name: func() for name, func in stat_funcs.items() if name in self.stats
-        }
+        dict = {name: func() for name, func in stat_funcs.items() if name in self.stats}
 
         if 'chull' in self.stats:
             dict['chull_all'] = self.get_chulls_connected_components(
@@ -533,13 +505,11 @@ class SpatialGraphAnalyzer:
                 min_degree=self.chull_min_degree,
             )
             for cluster in clusters:
-                dict[f'chull_cluster:{cluster}'] = (
-                    self.get_chulls_connected_components(
-                        clusters=[cluster],
-                        radius=radius,
-                        min_nds=self.chull_min_nds,
-                        min_degree=self.chull_min_degree,
-                    )
+                dict[f'chull_cluster:{cluster}'] = self.get_chulls_connected_components(
+                    clusters=[cluster],
+                    radius=radius,
+                    min_nds=self.chull_min_nds,
+                    min_degree=self.chull_min_degree,
                 )
 
         # average all chull dataframes in results and add number of chulls as one column
@@ -556,7 +526,18 @@ class SpatialGraphAnalyzer:
 
         return dict
 
-    def to_df(self):
+    def to_df(self) -> pd.DataFrame:
+        """
+        Collect the computed statistics into a single-row DataFrame.
+
+        Concatenates the per-radius, per-stat-group results (populated by
+        :meth:`run`) into one row indexed by ``self.index``. Column names are
+        prefixed with ``radius:{radius}_stat:{group}_`` so every statistic is
+        traceable to the radius and stat group it came from.
+
+        Returns:
+            pd.DataFrame: One row of spatial statistics for this sample/subunit.
+        """
         df = []
         for radius in self.results.keys():
             for result in self.results[radius].keys():
@@ -573,12 +554,22 @@ class SpatialGraphAnalyzer:
         return df
 
     def run(self) -> None:
+        """
+        Compute all selected spatial statistics across every configured radius.
+
+        Populates ``self.results`` (a dict keyed by radius) by calling
+        :meth:`get_spatial_stats` for each radius in ``self.radii``. Call
+        :meth:`to_df` afterwards to collect the results into a DataFrame.
+
+        Returns:
+            None
+        """
         self.results = dict()
         for radius in self.radii:
             self.results[radius] = self.get_spatial_stats(radius)
 
 
-def spatial_message_passing(adata, radius):
+def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     """
     Smooth latent representations over a spatial neighborhood graph.
 
@@ -587,19 +578,14 @@ def spatial_message_passing(adata, radius):
     Each object's smoothed latent is the (degree-normalized) average of itself and its
     spatial neighbors. The result is stored in ``adata.layers['spatial_message_passing']``.
 
-    Parameters
-    ----------
-    adata : ad.AnnData
-        Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
-        (falls back to the 'x', 'y', 'z' obs columns if 'spatial' is missing).
-    radius : int
-        Radius (in spatial units) used to connect neighboring objects.
+    Args:
+        adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
+            (falls back to the 'x', 'y', 'z' obs columns if 'spatial' is missing).
+        radius (int): Radius (in spatial units) used to connect neighboring objects.
 
-    Returns
-    -------
-    ad.AnnData
-        The same object, with the smoothed latents added as
-        ``.layers['spatial_message_passing']``.
+    Returns:
+        ad.AnnData: The same object, with the smoothed latents added as
+            ``.layers['spatial_message_passing']``.
     """
     # calculate knn graph in physical space
     if adata.obsm['spatial'] is None:

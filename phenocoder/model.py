@@ -7,7 +7,6 @@ from keras import layers, ops
 from keras.models import Model
 
 
-# TODO: add 3D versions...
 @keras.saving.register_keras_serializable(package='custom_layers')
 class Sampling(layers.Layer):
     """
@@ -80,12 +79,12 @@ class CVAE(Model):
 
     def __init__(
         self,
-        input_shape=(128, 128, 4),
-        latent_dim=128,
-        dense_dim=128,
-        conv_layers=(8, 16, 32, 64, 128),
-        dropout=0.5,
-        beta=1,
+        input_shape: tuple[int, int, int] = (128, 128, 4),
+        latent_dim: int = 128,
+        dense_dim: int = 128,
+        conv_layers: tuple[int, ...] = (8, 16, 32, 64, 128),
+        dropout: float = 0.5,
+        beta: float = 1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -108,7 +107,17 @@ class CVAE(Model):
         )
         self.kl_loss_tracker_val = keras.metrics.Mean(name='kl_loss_val')
 
-    def build_encoder(self):
+    def build_encoder(self) -> keras.Model:
+        """
+        Build the convolutional encoder network.
+
+        Stacks strided ``Conv2D`` layers (one per entry in ``self.conv_layers``)
+        followed by a dense projection, and outputs ``z_mean``, ``z_log_var`` and
+        the reparameterized latent sample ``z``.
+
+        Returns:
+            keras.Model: Encoder mapping an input patch to ``[z_mean, z_log_var, z]``.
+        """
         encoder_inputs = keras.Input(shape=self.input_shape)
         for i, n in enumerate(self.conv_layers):
             if i == 0:
@@ -129,7 +138,17 @@ class CVAE(Model):
         encoder = keras.Model(encoder_inputs, [z_mean, z_log_var, z], name='encoder')
         return encoder
 
-    def build_decoder(self):
+    def build_decoder(self) -> keras.Model:
+        """
+        Build the transposed-convolutional decoder network.
+
+        Projects the latent vector back to a spatial feature map and applies
+        stacked ``Conv2DTranspose`` layers (upsampling) to reconstruct all input
+        channels.
+
+        Returns:
+            keras.Model: Decoder mapping a latent vector to a reconstructed patch.
+        """
         latent_inputs = keras.Input(shape=(self.latent_dim,))
         dim_0 = self.input_shape[0] // 2 ** len(self.conv_layers)
         dim_1 = self.input_shape[1] // 2 ** len(self.conv_layers)
@@ -245,11 +264,22 @@ class CondCVAE(CVAE):
         >>> model.fit((train_images, train_conditions), epochs=100)
     """
 
-    def __init__(self, n_classes=2, **kwargs):
+    def __init__(self, n_classes: int, **kwargs):
         self.n_classes = n_classes
         super().__init__(**kwargs)
 
-    def build_encoder(self):
+    def build_encoder(self) -> keras.Model:
+        """
+        Build the conditional encoder network.
+
+        Like :meth:`CVAE.build_encoder`, but concatenates the one-hot condition
+        inputs (``self.n_classes`` wide) with the flattened features before the
+        dense projection, so the latent space is conditioned on the metadata.
+
+        Returns:
+            keras.Model: Encoder mapping ``[patch, condition]`` to
+                ``[z_mean, z_log_var, z]``.
+        """
         encoder_inputs = keras.Input(shape=self.input_shape)
         condition_inputs = keras.Input(shape=(self.n_classes,))
         for i, n in enumerate(self.conv_layers):
@@ -275,7 +305,17 @@ class CondCVAE(CVAE):
         )
         return encoder
 
-    def build_decoder(self):
+    def build_decoder(self) -> keras.Model:
+        """
+        Build the conditional decoder network.
+
+        Like :meth:`CVAE.build_decoder`, but concatenates the one-hot condition
+        inputs (``self.n_classes`` wide) with the latent vector before decoding.
+
+        Returns:
+            keras.Model: Decoder mapping ``[latent, condition]`` to a
+                reconstructed patch.
+        """
         latent_inputs = keras.Input(shape=(self.latent_dim,))
         condition_inputs = keras.Input(shape=(self.n_classes,))
         x = layers.concatenate([latent_inputs, condition_inputs])

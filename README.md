@@ -36,7 +36,9 @@ full workflow on top of it:
 - **Spatial message passing**: aggregate latents over a physical-distance neighborhood graph.
 - **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity and
   convex-hull statistics at sample or subunit resolution.
-- **Beta-VAE support**: tune the KL weight (`beta`) for more disentangled representations.
+- **Beta-VAE support**: `beta` weights the KL-divergence term against the reconstruction loss,
+  tuning the reconstruction-vs-regularization trade-off (higher `beta` → stronger latent
+  regularization; lower `beta` → higher reconstruction fidelity).
 - Built on Keras 3 with the TensorFlow backend.
 
 ## Installation
