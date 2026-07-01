@@ -109,7 +109,6 @@ def example_3d():
         table_key='nuclei_features',
         sample_key='well',
         image_key='IF',
-        labels_key='nuclei',
     )
     pheno.add_sdata(sdata)
 

@@ -21,16 +21,16 @@ class SpatialSubunitSampler:
 
     def partition(self):
         """
-        Partition into uniform cubes, filter by density, subsample dense cubes
+        Partition the observations into a uniform grid of cubic spatial subunits.
 
-            Parameters:
-            -----------
-            cube_size : float
-                Edge length of each cube in µm
-            min_nuclei_per_cube : int
-                Discard cubes with fewer nuclei (empty/sparse regions)
-            max_nuclei_per_cube : int
-                Subsample cubes with more nuclei to this target
+        Divides the bounding box of the spatial coordinates (``adata.obsm[spatial_key]``)
+        into cubes of edge length ``dim_subunit`` and assigns each observation to the cube
+        it falls in. The result is stored on ``self.subunits`` as a dict keyed by the
+        integer grid index of each cube, where each value holds the member observation
+        indices, their spatial coordinates, a bounding box and an integer subunit id.
+
+        Returns:
+            None
         """
 
         min_bounds = self.adata.obsm[self.spatial_key].min(axis=0)

@@ -10,6 +10,7 @@ uv.lock
 .DS_Store
 */__pycache__/
 build/
+docs/_build/
 phenocoder.egg-info/
 sdata/
 *.npy

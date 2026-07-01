@@ -1,0 +1,6 @@
+# Documentation build dependencies (kept minimal: heavy runtime deps such as
+# tensorflow / spatialdata are mocked in docs/conf.py via autodoc_mock_imports,
+# so the package itself is not installed on Read the Docs).
+sphinx>=8.0
+furo>=2024.8
+myst-parser>=4.0
