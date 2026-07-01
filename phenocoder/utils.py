@@ -12,6 +12,7 @@ import umap
 from skimage.util import montage
 
 if TYPE_CHECKING:
+    from matplotlib.figure import Figure
     from sklearn.preprocessing import OneHotEncoder
 
     from phenocoder.generator import SequenceGenerator
@@ -25,7 +26,7 @@ def plot_latent_space(
     sample_frac: float = 1,
     show: bool = True,
     return_fig: bool = False,
-) -> plt.Figure | None:
+) -> "Figure | None":
     """
     Plot UMAP visualization of the latent space colored by dataset and z-position.
 
@@ -99,7 +100,7 @@ def plot_reconstructions(
     batch_size: int = 64,
     show: bool = True,
     return_fig: bool = False,
-) -> plt.Figure | None:
+) -> "Figure | None":
     """
     Plot side-by-side comparison of input images and their VAE reconstructions.
 
@@ -154,7 +155,7 @@ def plot_reconstructions(
         return fig
 
 
-def plot_to_image(figure: plt.Figure) -> tf.Tensor:
+def plot_to_image(figure: "Figure") -> tf.Tensor:
     """
     Convert a matplotlib figure to a TensorFlow image tensor.
 
