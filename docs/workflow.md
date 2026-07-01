@@ -16,9 +16,9 @@ microtiter-plate *well*, e.g. `A06`, `G04`, `H03`):
 
 | Input | Location | Format | Description |
 | ----- | -------- | ------ | ----------- |
-| **Intensity images** | `imgs/` | one PNG per z-slice per channel | Raw microscopy signal. 4 channels (`C01`–`C04`) × 52 z-slices per well. The channel and z-index are encoded in the filename (`…A01Z01C04.png`). |
-| **Label masks** | `labels/` | one TIF per z-slice | Integer segmentation masks where each object (nucleus) has a unique label id, matching the `label` column of the table. |
-| **Feature table** | `tables/` | one CSV per z-slice | Per-object regionprops-style measurements. Columns: `label`, `centroid-0`, `centroid-1`, `area`, `eccentricity`, `intensity_mean-0…3`, `major_axis_length`, `minor_axis_length`, `well`, `z_stack`. |
+| **Intensity images** | `imgs/` | image data, one per z-slice per channel | Raw microscopy signal. 4 channels (`C01`–`C04`) x n z-slices per well. The channel and z-index are encoded in the filename. |
+| **Label masks** | `labels/` | image data, one per z-slice | Integer segmentation masks where each object (nucleus) has a unique label id, matching the `label` column of the table. |
+| **Feature table** | `tables/` | tabular data, one per z-slice | Per-object regionprops-style measurements. Columns: `label`, `centroid-0`, `centroid-1`, `area`, `eccentricity`, `intensity_mean-0…3`, `major_axis_length`, `minor_axis_length`, `well`, `z_stack`. |
 
 You do **not** need this exact on-disk layout — Phenocoder only cares about the assembled
 `SpatialData` object described next. Any pipeline (e.g. `regionprops` on a 3D label image, a
@@ -255,5 +255,51 @@ pheno.spatialgraph_stats(
     use_subunits=True,
     dim_subunit=(200, 200, 200),
     min_obs_per_subunit=10,
+)
+```
+
+## Standalone spatial graph analysis
+
+The spatial graph analysis does **not** depend on the CVAE.
+{meth}`~phenocoder.Phenocoder.spatialgraph_stats` runs on any table in the `SpatialData` object
+that has spatial coordinates in `.obsm` and a categorical label column in `.obs` — the labels
+can come from **any source**: Phenocoder latents, Leiden clustering of the raw morphometric
+features, marker-based cell-type annotations, manual region labels, and so on. This means you
+can run the spatial statistics on their own, without generating patches or training a model.
+
+```python
+import scanpy as sc
+from phenocoder import Phenocoder
+
+pheno = Phenocoder(table_key="nuclei_features", sample_key="well", image_key="IF")
+pheno.add_sdata(sdata)
+
+# Cluster the raw feature table directly (no CVAE involved).
+adata = pheno.sdata.tables["nuclei_features"]
+sc.pp.scale(adata)
+sc.pp.pca(adata)
+sc.pp.neighbors(adata)
+sc.tl.leiden(adata, resolution=0.05)
+
+# Run the spatial statistics on those labels
+pheno.spatialgraph_stats(
+    cluster_key="leiden",          # any categorical .obs column
+    spatial_key="spatial",         # coordinates in .obsm
+    radii=(25, 50),
+    table_key="nuclei_features",   # any table in sdata.tables
+)
+```
+
+By default every stat group is computed. Pass `stats=[...]` to select a subset — the valid
+groups are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters` and
+`chull`:
+
+```python
+pheno.spatialgraph_stats(
+    cluster_key="leiden",
+    spatial_key="spatial",
+    radii=(25, 50),
+    table_key="nuclei_features",
+    stats=["interactions", "connectivity"],  # only these groups
 )
 ```
