@@ -26,7 +26,13 @@ def test_workflow():
     # Add clustering for spatial graph statistics
     sc.pp.pca(pheno.sdata.tables['phenocoder'])
     sc.pp.neighbors(pheno.sdata.tables['phenocoder'])
-    sc.tl.leiden(pheno.sdata.tables['phenocoder'], resolution=0.5)
+    sc.tl.leiden(
+        pheno.sdata.tables['phenocoder'],
+        resolution=0.5,
+        flavor='igraph',
+        n_iterations=2,
+        directed=False,
+    )
     # same for message passed latents
     sc.pp.pca(
         pheno.sdata.tables['phenocoder'], layer='spatial_message_passing', n_comps=8
@@ -36,6 +42,9 @@ def test_workflow():
         pheno.sdata.tables['phenocoder'],
         resolution=0.5,
         key_added='leiden_message_passed',
+        flavor='igraph',
+        n_iterations=2,
+        directed=False,
     )
 
     # Test 1: Sample-level spatial graph statistics

@@ -64,6 +64,11 @@ pip install .
 
 ## Quick Start
 
+> **Runnable example:** [`examples/example_workflow.py`](examples/example_workflow.py) executes
+> the entire pipeline end to end on the small example dataset bundled with the repository
+> (`tests/data/3d/`) — no external data required. Run it with `python examples/example_workflow.py`.
+> The full narrative walkthrough is in the [documentation](https://phenocoder.readthedocs.io).
+
 Phenocoder operates on a `SpatialData` object whose images are keyed per sample as
 `f"{image_key}_{sample}"` (e.g. `IF_well01`) and whose table holds per-object spatial
 coordinates in `obsm`. The snippet below mirrors the end-to-end integration test in
@@ -107,7 +112,13 @@ pheno.encode(spatial_key_index="spatial_index", spatial_message_passing_radius=5
 # 5. Cluster the latents (standard scanpy), then compute spatial graph statistics
 sc.pp.pca(pheno.sdata.tables["phenocoder"])
 sc.pp.neighbors(pheno.sdata.tables["phenocoder"])
-sc.tl.leiden(pheno.sdata.tables["phenocoder"], resolution=0.5)
+sc.tl.leiden(
+    pheno.sdata.tables["phenocoder"],
+    resolution=0.5,
+    flavor="igraph",
+    n_iterations=2,
+    directed=False,
+)
 
 pheno.spatialgraph_stats(
     cluster_key="leiden",
@@ -168,7 +179,7 @@ adata = pheno.sdata.tables["nuclei_features"]
 sc.pp.scale(adata)
 sc.pp.pca(adata)
 sc.pp.neighbors(adata)
-sc.tl.leiden(adata, resolution=0.05)
+sc.tl.leiden(adata, resolution=0.05, flavor="igraph", n_iterations=2, directed=False)
 
 # Run the spatial statistics on those labels
 pheno.spatialgraph_stats(

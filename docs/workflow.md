@@ -8,6 +8,15 @@ bundles the intensity images, the segmentation label masks and a per-object feat
 example below runs the full pipeline end to end and mirrors the integration test in
 `tests/test_workflow.py` (the SpatialData object it uses is built in `tests/conftest.py`).
 
+```{tip}
+A complete, runnable version of this walkthrough is provided as
+[`examples/example_workflow.py`](https://github.com/devsystemslab/phenocoder/blob/main/examples/example_workflow.py).
+It executes the entire pipeline on the small example dataset bundled with the repository
+(`tests/data/3d/`), so you can run it directly without downloading any external data:
+
+    python examples/example_workflow.py
+```
+
 ## Input data
 
 The starting point is the output of a typical microscopy segmentation pipeline. In the bundled
@@ -206,7 +215,13 @@ convex-hull statistics.
 # Cluster the latents (standard scanpy)
 sc.pp.pca(pheno.sdata.tables["phenocoder"])
 sc.pp.neighbors(pheno.sdata.tables["phenocoder"])
-sc.tl.leiden(pheno.sdata.tables["phenocoder"], resolution=0.5)
+sc.tl.leiden(
+    pheno.sdata.tables["phenocoder"],
+    resolution=0.5,
+    flavor="igraph",
+    n_iterations=2,
+    directed=False,
+)
 
 # Compute spatial graph statistics
 pheno.spatialgraph_stats(
@@ -279,7 +294,7 @@ adata = pheno.sdata.tables["nuclei_features"]
 sc.pp.scale(adata)
 sc.pp.pca(adata)
 sc.pp.neighbors(adata)
-sc.tl.leiden(adata, resolution=0.05)
+sc.tl.leiden(adata, resolution=0.05, flavor="igraph", n_iterations=2, directed=False)
 
 # Run the spatial statistics on those labels
 pheno.spatialgraph_stats(

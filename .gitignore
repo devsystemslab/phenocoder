@@ -11,6 +11,7 @@ uv.lock
 */__pycache__/
 build/
 docs/_build/
+examples/output/
 phenocoder.egg-info/
 sdata/
 *.npy

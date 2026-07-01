@@ -1158,11 +1158,12 @@ class Phenocoder:
             )
             n_dim = max_dim
 
-        # Compute PCA
+        # Compute PCA. ``mask_var`` replaces the deprecated ``use_highly_variable``
+        # argument: "highly_variable" restricts PCA to HVGs, None uses all features.
         sc.pp.pca(
             self.adata,
             n_comps=n_dim,
-            use_highly_variable=variable_features,
+            mask_var='highly_variable' if variable_features else None,
         )
 
         if batch_correction:
