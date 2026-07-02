@@ -114,10 +114,7 @@ sc.pp.pca(pheno.sdata.tables["phenocoder"])
 sc.pp.neighbors(pheno.sdata.tables["phenocoder"])
 sc.tl.leiden(
     pheno.sdata.tables["phenocoder"],
-    resolution=0.5,
-    flavor="igraph",
-    n_iterations=2,
-    directed=False,
+    resolution=0.5
 )
 
 pheno.spatialgraph_stats(
@@ -179,7 +176,7 @@ adata = pheno.sdata.tables["nuclei_features"]
 sc.pp.scale(adata)
 sc.pp.pca(adata)
 sc.pp.neighbors(adata)
-sc.tl.leiden(adata, resolution=0.05, flavor="igraph", n_iterations=2, directed=False)
+sc.tl.leiden(adata, resolution=0.5)
 
 # Run the spatial statistics on those labels
 pheno.spatialgraph_stats(
