@@ -252,11 +252,6 @@ ruff format .
 ruff check .
 ```
 
-## Project Status
-
-Phenocoder is under active development. Some methods still contain dataset-specific
-assumptions (noted in their docstrings) that are being generalized.
-
 ## License
 
 Released under the [MIT License](LICENSE). Copyright (c) 2026 DevSystems Lab.

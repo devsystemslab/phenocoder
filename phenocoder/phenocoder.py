@@ -591,8 +591,10 @@ class Phenocoder:
                 latent dimensions named ``phc_latent_{i}`` in ``.var``).
 
         Note:
-            This method contains dataset-specific code (the 'z'/'dataset' conditions) that
-            should be generalized.
+            The condition names ``'z'`` and ``'dataset'`` are treated specially: ``'z'`` is
+            derived from the spatial coordinates and ``'dataset'`` is reconstructed from the
+            saved ``patches.csv``. Any other condition columns are carried over from the
+            table's ``.obs``.
 
         Example:
             >>> phenocoder.encode(batch_size=128, spatial_message_passing_radius=50)
