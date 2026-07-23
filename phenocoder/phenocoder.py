@@ -196,6 +196,8 @@ class Phenocoder:
         metadata_keys: list[str] | None = None,
         scale_percentile: float = 1,
         scale_per_sample: bool = True,
+        n_samples: int = None,
+        n_patches: int = None,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -252,6 +254,8 @@ class Phenocoder:
             metadata_keys=metadata_keys,
             scale_percentile=scale_percentile,
             scale_per_sample=scale_per_sample,
+            n_samples=n_samples,
+            n_patches=n_patches,
         )
         self.patch_generator.generate_dataset(dataset, dir_output=self.data_dir)
 
