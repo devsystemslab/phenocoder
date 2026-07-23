@@ -16,21 +16,10 @@ import yaml
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
-from phenocoder.utils import write_training_plots_to_tensorboard
-
-
-def _coerce_stringdtype_uns(adata: ad.AnnData) -> None:
-    """Coerce NumPy ``StringDType`` arrays in ``adata.uns`` to object dtype, in place.
-
-    scanpy stores categorical color palettes (e.g. ``<key>_colors``) in ``uns`` and
-    anndata reads them back as NumPy 2.0 ``StringDType`` arrays (``dtype.kind == 'T'``).
-    Those arrays segfault under ``copy.deepcopy``, which ``AnnData.copy()`` uses when
-    subsetting per sample. Coercing to object dtype is harmless for plotting and
-    serialization and makes the table safe to copy.
-    """
-    for key, val in list(adata.uns.items()):
-        if isinstance(val, np.ndarray) and val.dtype.kind == 'T':
-            adata.uns[key] = np.asarray(val, dtype=object)
+from phenocoder.utils import (
+    _coerce_stringdtype_uns,
+    write_training_plots_to_tensorboard,
+)
 
 
 class Phenocoder:
@@ -257,7 +246,9 @@ class Phenocoder:
             n_samples=n_samples,
             n_patches=n_patches,
         )
-        self.patch_generator.generate_dataset(dataset, dir_output=self.data_dir)
+        self.patch_generator.generate_dataset(
+            dataset, dir_output=self.data_dir, n_samples=n_samples, n_patches=n_patches
+        )
 
     def initialize_model(
         self,

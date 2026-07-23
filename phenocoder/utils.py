@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import anndata as ad
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -234,3 +235,17 @@ def write_training_plots_to_tensorboard(
     )
     with file_writer.as_default():
         tf.summary.image('latent space', plot_to_image(figure_latent_space), step=0)
+
+
+def _coerce_stringdtype_uns(adata: ad.AnnData) -> None:
+    """Coerce NumPy ``StringDType`` arrays in ``adata.uns`` to object dtype, in place.
+
+    scanpy stores categorical color palettes (e.g. ``<key>_colors``) in ``uns`` and
+    anndata reads them back as NumPy 2.0 ``StringDType`` arrays (``dtype.kind == 'T'``).
+    Those arrays segfault under ``copy.deepcopy``, which ``AnnData.copy()`` uses when
+    subsetting per sample. Coercing to object dtype is harmless for plotting and
+    serialization and makes the table safe to copy.
+    """
+    for key, val in list(adata.uns.items()):
+        if isinstance(val, np.ndarray) and val.dtype.kind == 'T':
+            adata.uns[key] = np.asarray(val, dtype=object)
