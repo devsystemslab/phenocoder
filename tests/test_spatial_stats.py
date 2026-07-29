@@ -12,7 +12,9 @@ def _clustered_adata():
     sc.pp.scale(adata)
     sc.pp.pca(adata)
     sc.pp.neighbors(adata)
-    sc.tl.leiden(adata, resolution=0.05)
+    sc.tl.leiden(
+        adata, resolution=0.05, flavor='igraph', n_iterations=2, directed=False
+    )
     return adata
 
 

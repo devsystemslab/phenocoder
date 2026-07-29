@@ -36,6 +36,32 @@ docs = [
     "myst-parser>=4.0",
 ]
 
+[tool.pytest.ini_options]
+# Suppress only known-irreducible warnings from third-party library internals
+# that our calls trigger. Message-specific ignores keep our own future
+# FutureWarnings/UserWarnings visible.
+filterwarnings = [
+    # docrep docstring decoration, fires at squidpy import time
+    "ignore:.*is not a valid key.*:SyntaxWarning",
+    # scanpy legacy_api_wrap dtype coercion
+    "ignore:X converted to numpy array with dtype float64:UserWarning",
+    # anndata index coercion
+    "ignore:Transforming to str index.*:UserWarning",
+    # spatialdata table/region handling
+    "ignore:Converting .*region.* to categorical dtype.*:UserWarning",
+    "ignore:The table is annotating .*which is not present.*:UserWarning",
+    # squidpy spatial_autocorr Moran permutation on degenerate test graphs
+    "ignore:divide by zero encountered in matmul:RuntimeWarning",
+    "ignore:overflow encountered in matmul:RuntimeWarning",
+    "ignore:invalid value encountered in matmul:RuntimeWarning",
+    # squidpy interaction-matrix normalization on zero-sum rows (small test graph)
+    "ignore:invalid value encountered in divide:RuntimeWarning",
+    # keras/tensorflow tensor -> numpy conversion internals
+    "ignore:__array__ implementation doesn't accept a copy keyword:DeprecationWarning",
+    # spatialdata -> ome_zarr deprecated downsampler
+    "ignore:Call to deprecated class Scaler.*:DeprecationWarning",
+]
+
 [tool.ruff]
 line-length = 120
 [tool.basedpyright]

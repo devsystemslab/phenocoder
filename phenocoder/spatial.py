@@ -480,10 +480,9 @@ class SpatialGraphAnalyzer:
         # The neighbor graph (spatial_connectivities) is needed by every stat group
         # except chull; skip building it if only chull was requested.
         if self.stats - {'chull'}:
-            sq.gr.spatial_neighbors(
+            sq.gr.spatial_neighbors_radius(
                 self.adata,
                 radius=radius,
-                coord_type='generic',
                 spatial_key=self.spatial_key,
             )
         clusters = self.adata.obs[self.cluster_key].unique().tolist()
@@ -590,9 +589,7 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     # calculate knn graph in physical space
     if adata.obsm['spatial'] is None:
         adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
-    sq.gr.spatial_neighbors(
-        adata, radius=radius, coord_type='generic', spatial_key='spatial'
-    )
+    sq.gr.spatial_neighbors_radius(adata, radius=radius, spatial_key='spatial')
     A = adata.obsp['spatial_connectivities'].copy()
     A = A + csr_array(np.diag(np.ones(A.shape[0])))
     # weight A with inverse degree matrix
