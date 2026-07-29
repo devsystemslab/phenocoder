@@ -569,8 +569,12 @@ class DatasetLoader:
         )
         # drop remainders of splits regarding batch_size
         self.patches = (
-            self.patches.groupby('split')
-            .apply(lambda x: x.iloc[: -(x.shape[0] % batch_size)])
+            self.patches.groupby('split', group_keys=True)
+            .apply(
+                lambda x: x.iloc[: -(x.shape[0] % batch_size)],
+                include_groups=False,
+            )
+            .reset_index(level=0)
             .reset_index(drop=True)
         )
         # expand files to complete paths

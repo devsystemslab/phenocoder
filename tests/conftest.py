@@ -14,7 +14,11 @@ import phenocoder as phc
 def example_3d():
     dir_tables = 'tests/data/3d/tables'
     table_files = sorted(os.listdir(dir_tables))
-    df = pd.concat([pd.read_csv(Path(dir_tables, file)) for file in table_files])
+    frames = [pd.read_csv(Path(dir_tables, file)) for file in table_files]
+    # Drop empty / all-NA frames so concat doesn't emit the future dtype-inference
+    # FutureWarning; concatenating only non-empty frames preserves the result.
+    frames = [frame for frame in frames if not frame.dropna(axis=1, how='all').empty]
+    df = pd.concat(frames)
     z_step = 10
     pixel_size = 0.322
     df['centroid-0'] = df['centroid-0'] / 4
