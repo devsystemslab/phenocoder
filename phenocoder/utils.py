@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import logging
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,6 +20,63 @@ if TYPE_CHECKING:
 
     from phenocoder.generator import SequenceGenerator
     from phenocoder.model import CVAE, CondCVAE
+
+
+# squidpy's graph builders log one INFO line per graph through spatialdata's
+# logger (``squidpy/gr/_build.py`` imports it from ``spatialdata._logging``).
+# Phenocoder builds a graph per (sample/subunit, radius), which floods the
+# console on real data, so those calls are wrapped in the context manager below.
+_SPATIALDATA_LOGGER = 'spatialdata._logging'
+
+_verbose_logging = False
+
+
+def set_verbose_logging(enabled: bool) -> None:
+    """
+    Enable or disable spatialdata/squidpy INFO output during phenocoder calls.
+
+    Phenocoder silences the per-graph ``Creating graph using ...`` INFO messages
+    that squidpy emits while building spatial neighbor graphs. Enable this to see
+    them again, e.g. when debugging graph construction.
+
+    Args:
+        enabled (bool): If True, let spatialdata's INFO messages through. If False
+            (the default), suppress them while phenocoder builds spatial graphs.
+
+    Returns:
+        None
+
+    Example:
+        >>> import phenocoder as phc
+        >>> phc.set_verbose_logging(True)
+    """
+    global _verbose_logging
+    _verbose_logging = enabled
+
+
+@contextmanager
+def quiet_spatialdata_logging(level: int = logging.WARNING):
+    """
+    Temporarily raise spatialdata's log level, restoring the previous level on exit.
+
+    Used around squidpy graph-building calls to keep the console readable. Becomes
+    a no-op when verbose logging is enabled via :func:`set_verbose_logging`.
+
+    Args:
+        level (int): Log level applied for the duration of the block. Defaults to
+            ``logging.WARNING``.
+
+    Yields:
+        None
+    """
+    logger = logging.getLogger(_SPATIALDATA_LOGGER)
+    previous = logger.level
+    if not _verbose_logging:
+        logger.setLevel(level)
+    try:
+        yield
+    finally:
+        logger.setLevel(previous)
 
 
 def plot_latent_space(

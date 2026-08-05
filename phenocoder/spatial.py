@@ -9,6 +9,8 @@ from scipy.sparse import csr_array
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.neighbors import radius_neighbors_graph
 
+from phenocoder.utils import quiet_spatialdata_logging
+
 
 class SpatialGraphAnalyzer:
     """
@@ -480,11 +482,12 @@ class SpatialGraphAnalyzer:
         # The neighbor graph (spatial_connectivities) is needed by every stat group
         # except chull; skip building it if only chull was requested.
         if self.stats - {'chull'}:
-            sq.gr.spatial_neighbors_radius(
-                self.adata,
-                radius=radius,
-                spatial_key=self.spatial_key,
-            )
+            with quiet_spatialdata_logging():
+                sq.gr.spatial_neighbors_radius(
+                    self.adata,
+                    radius=radius,
+                    spatial_key=self.spatial_key,
+                )
         clusters = self.adata.obs[self.cluster_key].unique().tolist()
 
         stat_funcs = {
@@ -589,7 +592,8 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     # calculate knn graph in physical space
     if adata.obsm['spatial'] is None:
         adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
-    sq.gr.spatial_neighbors_radius(adata, radius=radius, spatial_key='spatial')
+    with quiet_spatialdata_logging():
+        sq.gr.spatial_neighbors_radius(adata, radius=radius, spatial_key='spatial')
     A = adata.obsp['spatial_connectivities'].copy()
     A = A + csr_array(np.diag(np.ones(A.shape[0])))
     # weight A with inverse degree matrix
