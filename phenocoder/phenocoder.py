@@ -12,6 +12,7 @@ import pandas as pd
 import scanpy as sc
 import spatialdata as sd
 import yaml
+from tqdm import tqdm
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
@@ -682,6 +683,7 @@ class Phenocoder:
         min_obs_per_subunit: int = 100,
         max_obs_per_subunit: int | None = None,
         verbose: bool = False,
+        progress: bool = True,
     ) -> None:
         """
         Generate statistics for spatial neighborhood graphs of each sample or subunit.
@@ -721,6 +723,8 @@ class Phenocoder:
                 Defaults to None.
             verbose (bool, optional): Whether to print progress information during
                 subunit partitioning. Defaults to False.
+            progress (bool, optional): Whether to display tqdm progress bars while
+                partitioning samples and computing statistics. Defaults to True.
 
         Returns:
             None
@@ -793,13 +797,19 @@ class Phenocoder:
             # Import SpatialSubunitSampler
             from phenocoder.sampling import SpatialSubunitSampler
 
-            for sample in samples:
+            # Pass 1: partition every sample so the total subunit count (and thus a
+            # meaningful progress total) is known before any statistics are computed.
+            adata_samples = {}
+            work_items = []
+            for sample in tqdm(
+                samples, desc='Partitioning samples', disable=not progress
+            ):
                 # Subset data for this sample
                 adata_sample = adata[adata.obs[self.sample_key] == sample].copy()
 
                 # Check if sample has enough cells
                 if len(adata_sample) == 0:
-                    print(f'Warning: Sample {sample} has no cells, skipping.')
+                    tqdm.write(f'Warning: Sample {sample} has no cells, skipping.')
                     continue
 
                 # Partition into subunits
@@ -817,65 +827,76 @@ class Phenocoder:
                     sampler.sample(max_obs=max_obs_per_subunit)
 
                 if len(sampler.subunits) == 0:
-                    print(
+                    tqdm.write(
                         f'Warning: Sample {sample} has no valid subunits after filtering, skipping.'
                     )
                     continue
 
                 if verbose:
-                    print(
+                    tqdm.write(
                         f'Sample {sample}: {len(sampler.subunits)} subunits after filtering'
                     )
 
-                # Process each subunit
+                # Keep one copy per sample; work items reference it by key so large
+                # AnnData objects are not duplicated per subunit.
+                adata_samples[sample] = adata_sample
                 for subunit_key, subunit_data in sampler.subunits.items():
-                    # Get observations for this subunit
-                    subunit_obs_indices = subunit_data['obs_indices']
-                    adata_subunit = adata_sample[subunit_obs_indices].copy()
+                    work_items.append((sample, subunit_key, subunit_data))
 
-                    # Check if subunit has enough cells and clusters
-                    if len(adata_subunit) == 0:
-                        continue
+            # Pass 2: compute statistics for every collected subunit under one bar.
+            for sample, subunit_key, subunit_data in tqdm(
+                work_items,
+                desc='Computing spatial graph stats',
+                disable=not progress,
+            ):
+                adata_sample = adata_samples[sample]
+                # Get observations for this subunit
+                subunit_obs_indices = subunit_data['obs_indices']
+                adata_subunit = adata_sample[subunit_obs_indices].copy()
 
-                    n_clusters = len(adata_subunit.obs[cluster_key].unique())
-                    if n_clusters <= 1:
-                        if verbose:
-                            print(
-                                f'Warning: Sample {sample}, subunit {subunit_key} has '
-                                f'{n_clusters} cluster(s), skipping (need >1 for spatial stats).'
-                            )
-                        continue
+                # Check if subunit has enough cells and clusters
+                if len(adata_subunit) == 0:
+                    continue
 
-                    # Run spatial graph analysis for this subunit
-                    try:
-                        subunit_index = f'{sample}_subunit_{subunit_data["id"]}'
-                        sga = SpatialGraphAnalyzer(
-                            adata=adata_subunit,
-                            cluster_key=cluster_key,
-                            spatial_key=spatial_key,
-                            radii=radii,
-                            index=subunit_index,
-                            stats=stats,
-                            chull_min_nds=chull_min_nds,
-                            chull_min_degree=chull_min_degree,
+                n_clusters = len(adata_subunit.obs[cluster_key].unique())
+                if n_clusters <= 1:
+                    if verbose:
+                        tqdm.write(
+                            f'Warning: Sample {sample}, subunit {subunit_key} has '
+                            f'{n_clusters} cluster(s), skipping (need >1 for spatial stats).'
                         )
-                        sga.run()
-                        df_subunit = sga.to_df()
+                    continue
 
-                        # Add metadata columns
-                        df_subunit[self.sample_key] = sample
-                        df_subunit['subunit_id'] = subunit_data['id']
-                        df_subunit['subunit_key'] = str(subunit_key)
-                        df_subunit['subunit_n_obs'] = len(subunit_obs_indices)
+                # Run spatial graph analysis for this subunit
+                try:
+                    subunit_index = f'{sample}_subunit_{subunit_data["id"]}'
+                    sga = SpatialGraphAnalyzer(
+                        adata=adata_subunit,
+                        cluster_key=cluster_key,
+                        spatial_key=spatial_key,
+                        radii=radii,
+                        index=subunit_index,
+                        stats=stats,
+                        chull_min_nds=chull_min_nds,
+                        chull_min_degree=chull_min_degree,
+                    )
+                    sga.run()
+                    df_subunit = sga.to_df()
 
-                        results.append(df_subunit)
-                    except Exception as e:
-                        if verbose:
-                            print(
-                                f'Warning: Failed to compute stats for sample {sample}, '
-                                f'subunit {subunit_key}: {str(e)}'
-                            )
-                        continue
+                    # Add metadata columns
+                    df_subunit[self.sample_key] = sample
+                    df_subunit['subunit_id'] = subunit_data['id']
+                    df_subunit['subunit_key'] = str(subunit_key)
+                    df_subunit['subunit_n_obs'] = len(subunit_obs_indices)
+
+                    results.append(df_subunit)
+                except Exception as e:
+                    if verbose:
+                        tqdm.write(
+                            f'Warning: Failed to compute stats for sample {sample}, '
+                            f'subunit {subunit_key}: {str(e)}'
+                        )
+                    continue
 
             if len(results) == 0:
                 print('Warning: No spatial statistics computed for any subunits.')
@@ -904,18 +925,22 @@ class Phenocoder:
 
         else:
             # sample-level analysis
-            for sample in samples:
+            for sample in tqdm(
+                samples,
+                desc='Computing spatial graph stats',
+                disable=not progress,
+            ):
                 # Subset data for this sample
                 adata_sample = adata[adata.obs[self.sample_key] == sample].copy()
 
                 # Check if sample has enough cells and clusters
                 if len(adata_sample) == 0:
-                    print(f'Warning: Sample {sample} has no cells, skipping.')
+                    tqdm.write(f'Warning: Sample {sample} has no cells, skipping.')
                     continue
 
                 n_clusters = len(adata_sample.obs[cluster_key].unique())
                 if n_clusters <= 1:
-                    print(
+                    tqdm.write(
                         f'Warning: Sample {sample} has {n_clusters} cluster(s), '
                         f'skipping (need >1 for spatial stats).'
                     )
@@ -937,7 +962,7 @@ class Phenocoder:
                     df_sample = sga.to_df()
                     results.append(df_sample)
                 except Exception as e:
-                    print(
+                    tqdm.write(
                         f'Warning: Failed to compute stats for sample {sample}: {str(e)}'
                     )
                     continue
