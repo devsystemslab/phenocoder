@@ -788,8 +788,23 @@ class Phenocoder:
                 f'Available columns: {list(adata.obs.columns)}'
             )
 
-        # Get unique samples
+        # Get unique samples, and the row positions belonging to each.
+        #
+        # Both loops below need one sample's rows at a time. Selecting them with a
+        # boolean mask (`adata[adata.obs[sample_key] == sample]`) rescans the whole
+        # sample column once per sample, making the loop O(n_samples * n_obs) in the
+        # indexing alone. On a 38M-row table with 82k samples that is ~1.7 s per
+        # sample -- more than the statistics themselves cost. One grouping pass up
+        # front makes each selection O(rows in that sample).
+        #
+        # `samples` still comes from .unique() so the iteration order, and the
+        # handling of a sample_key value that groupby drops (NaN -> no rows -> the
+        # "has no cells" warning below), are exactly as before.
         samples = adata.obs[self.sample_key].unique()
+        sample_rows = adata.obs.groupby(
+            self.sample_key, sort=False, observed=True
+        ).indices
+        no_rows = np.empty(0, dtype=int)
 
         results = []
 
@@ -805,7 +820,7 @@ class Phenocoder:
                 samples, desc='Partitioning samples', disable=not progress
             ):
                 # Subset data for this sample
-                adata_sample = adata[adata.obs[self.sample_key] == sample].copy()
+                adata_sample = adata[sample_rows.get(sample, no_rows)].copy()
 
                 # Check if sample has enough cells
                 if len(adata_sample) == 0:
@@ -931,7 +946,7 @@ class Phenocoder:
                 disable=not progress,
             ):
                 # Subset data for this sample
-                adata_sample = adata[adata.obs[self.sample_key] == sample].copy()
+                adata_sample = adata[sample_rows.get(sample, no_rows)].copy()
 
                 # Check if sample has enough cells and clusters
                 if len(adata_sample) == 0:

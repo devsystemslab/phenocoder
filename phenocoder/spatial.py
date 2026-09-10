@@ -290,7 +290,9 @@ class SpatialGraphAnalyzer:
                 by self.index.
         """
         adata = self.adata.copy()
-        if np.sum(adata.obsp.get('spatial_connectivities').toarray()) == 0:
+        # .sum() on the sparse matrix is O(nnz) and gives the same number as
+        # np.sum(.toarray()), which densified an n x n matrix just to test emptiness.
+        if adata.obsp.get('spatial_connectivities').sum() == 0:
             df_moran = pd.DataFrame(0, index=[self.index], columns=adata.var_names)
             return df_moran
         sq.gr.spatial_autocorr(
@@ -298,7 +300,10 @@ class SpatialGraphAnalyzer:
             mode='moran',
             connectivity_key='spatial_connectivities',
             genes=adata.var_names,
-            n_perms=100,
+            # Only the 'I' column is kept below, and I is computed analytically --
+            # the permutations exist solely to produce pval_sim/var_sim, which are
+            # discarded. Skipping them is ~30x faster and leaves I bit-identical.
+            n_perms=None,
             n_jobs=1,
             show_progress_bar=False,
         )
@@ -324,7 +329,8 @@ class SpatialGraphAnalyzer:
         adata_cl = ad.AnnData(
             df, obs=self.adata.obs, obsm=self.adata.obsm, obsp=self.adata.obsp
         )
-        if np.sum(self.adata.obsp.get('spatial_connectivities').toarray()) == 0:
+        # O(nnz) emptiness test; see get_moran.
+        if self.adata.obsp.get('spatial_connectivities').sum() == 0:
             df_moran = pd.DataFrame(0, index=[self.index], columns=self.adata.var_names)
             return df_moran
         sq.gr.spatial_autocorr(
@@ -332,7 +338,8 @@ class SpatialGraphAnalyzer:
             mode='moran',
             connectivity_key='spatial_connectivities',
             genes=adata_cl.var_names,
-            n_perms=100,
+            # Only 'I' is kept below; see get_moran.
+            n_perms=None,
             n_jobs=1,
             show_progress_bar=False,
         )
