@@ -242,6 +242,59 @@ representation for comparison. Results are stored in `pheno.adata`.
 pheno.spatialgraph_embedding(n_dim=32, scale=True, umap=True)
 ```
 
+## 7. Mapping new samples into a reference space
+
+`spatialgraph_embedding` is a **fit**: it derives the axes from whatever samples it is given.
+Re-running it on reference + query pooled therefore *moves* the axes, which is fine for an
+ordinary comparison but not when the reference means something on its own — a space built
+from a simulation parameter sweep, say, where PC1 is a density gradient you swept
+deliberately.
+
+To keep the axes fixed, save the fitted transforms and project new samples through them:
+
+```python
+# Reference (e.g. simulation). Needs no images and no CVAE.
+ref = Phenocoder(table_key="cells", sample_key="sample", project_dir="ref_project")
+ref.add_sdata(sim_sdata)
+ref.spatialgraph_stats(cluster_key="cell_type", radii=(25, 50))
+ref.spatialgraph_embedding(n_dim=32, scale=True, umap=True, save_transform=True)
+# -> ref_project/reference/embedding_transform.joblib
+
+# Query (experimental): same cluster_key, radii and stats.
+query.spatialgraph_stats(cluster_key="cell_type", radii=(25, 50))
+query.spatialgraph_map_query("ref_project/reference/embedding_transform.joblib")
+query.adata.obsm["X_pca"]   # reference coordinates
+```
+
+{meth}`~phenocoder.Phenocoder.spatialgraph_map_query` fits nothing — the stored scaler, PCA
+and UMAP are applied as they were, so the reference coordinates do not move.
+
+Things worth knowing:
+
+- **The label set must be shared.** Reference and query need the same `cluster_key`
+  categories, which in practice means transferring the reference labels onto the query rather
+  than clustering it independently. This is checked, along with `radii` and `stats`, and a
+  mismatch raises.
+- **Per-sample feature sets legitimately differ.** A sample that contains no cells of some
+  cluster emits no columns for it; those are zero-filled. Query-only features cannot be
+  projected (the reference PCA has no loading for them) and are dropped with a warning.
+- **Near-constant reference features are clipped.** If a feature barely varied across the
+  reference, dividing a query's deviation by that tiny standard deviation can turn a trivial
+  difference into hundreds of standard deviations. Scaled values are clipped to ±10 sd by
+  default; pass `clip=None` to disable.
+- **Use PCA for quantitative work.** Reference points re-projected through the saved UMAP
+  land exactly where they did at fit time, but query points get UMAP's approximate
+  `transform` and are best treated as a visualization.
+- **Batch correction cannot be saved.** `bbknn.ridge_regression` has no transform-only form,
+  so `save_transform=True` with `batch_correction=True` raises. Leave the reference
+  uncorrected; a batch effect then shows up as a shift in the projected coordinates, which is
+  usually the quantity of interest.
+- **`save_transform=True` shifts the numbers slightly.** Scaling switches from `sc.pp.scale`
+  (ddof=1) to sklearn's `StandardScaler` (ddof=0) so there is an object to persist — a factor
+  of `sqrt(n/(n-1))` per feature, 2.6% at 20 samples. PCA directions are unaffected; absolute
+  coordinates are not, so embeddings fitted with and without `save_transform` are not
+  directly comparable.
+
 ## Per-sample vs. global scaling
 
 Intensity normalization can be computed per sample (each sample scaled to its own intensity

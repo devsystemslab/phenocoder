@@ -25,6 +25,8 @@ class drives the full workflow on top of it.
    statistics per sample (or per spatial subunit) from clustered latents.
 6. **{meth}`~phenocoder.Phenocoder.spatialgraph_embedding`** — embed the per-sample/per-subunit
    statistics (PCA + UMAP, with optional batch correction) for sample-level comparison.
+7. **{meth}`~phenocoder.Phenocoder.spatialgraph_map_query`** — project new samples into a
+   previously saved embedding space without refitting it.
 
 ## Features
 

@@ -11,6 +11,7 @@ phenocoder
 models
 generator
 spatial
+reference
 sampling
 utils
 ```

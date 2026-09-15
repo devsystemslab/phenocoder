@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,19 @@ import pandas as pd
 import scanpy as sc
 import spatialdata as sd
 import yaml
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
+from umap import UMAP
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
+from phenocoder.reference import (
+    apply_transform,
+    check_stats_config,
+    load_transform,
+)
+from phenocoder.reference import save_transform as save_reference_transform
 from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
 from phenocoder.utils import (
     _coerce_stringdtype_uns,
@@ -91,11 +101,9 @@ class Phenocoder:
                 - sample_key: key used to identify samples in sdata tables
                 - spatial_key: spatial key name/index
                 - table_key: table key in sdata.tables
-                - project_dir: root directory for all artifacts (datasets, models,
-                  tensorboard logs, reference transforms, zarr store)
+                - project_dir: root directory for all artifacts
                 - datasets: list of dataset identifiers
-                - dataset_dirs: mapping of dataset name -> directory, for datasets stored
-                  outside project_dir
+                - dataset_dirs: dataset name -> directory, for out-of-tree datasets
                 - data_generator_train: training data generator
                 - data_generator_val: validation data generator
                 - df_conditions: DataFrame of condition labels
@@ -136,10 +144,16 @@ class Phenocoder:
         self.model_name: str | None = kwargs.get('model_name', None)
         self.dir_tensorboard: Path | None = kwargs.get('dir_tensorboard', None)
         self.data_loader = kwargs.get('data_loader', None)
+        # How the statistics in self.adata were computed; set by spatialgraph_stats and
+        # used to validate a query against a saved reference space.
+        self.stats_config: dict | None = kwargs.get('stats_config', None)
 
     @property
     def project_dir(self) -> Path | None:
-        """Path | None: Root directory for all artifacts. Coerced to ``Path`` on assignment."""
+        """Path | None: Root directory for all artifacts. Coerced to ``Path`` on assignment.
+
+        :meta private:
+        """
         return self._project_dir
 
     @project_dir.setter
@@ -896,6 +910,20 @@ class Phenocoder:
                 f'Available columns: {list(adata.obs.columns)}'
             )
 
+        # Several statistics name their columns from `cluster_key`'s *categories* rather
+        # than from the labels a given sample happens to contain (see
+        # SpatialGraphAnalyzer.get_interactions / get_centrality / get_connectivity), which
+        # is what keeps the feature set identical across samples. AnnData subsetting keeps
+        # unused categories, so that holds -- but only if the column is Categorical.
+        # get_moran_cluster uses pd.get_dummies, which silently emits only-observed columns
+        # for an object/string column. Coerce once, here, so the invariant is guaranteed
+        # rather than assumed.
+        if not isinstance(adata.obs[cluster_key].dtype, pd.CategoricalDtype):
+            adata.obs[cluster_key] = pd.Categorical(adata.obs[cluster_key])
+        cluster_categories = [
+            str(c) for c in adata.obs[cluster_key].cat.categories.tolist()
+        ]
+
         if spatial_key not in adata.obsm.keys():
             raise ValueError(
                 f'spatial_key "{spatial_key}" not found in adata.obsm. '
@@ -1107,6 +1135,16 @@ class Phenocoder:
                 var=pd.DataFrame(index=df_stats.columns),
             )
 
+        # Record how these statistics were produced. A matching feature *set* is not enough
+        # to make two runs comparable -- statistics at different radii carry identical
+        # column names -- so reference mapping validates this config too.
+        self.stats_config = {
+            'cluster_key': cluster_key,
+            'radii': tuple(radii),
+            'stats': list(stats) if stats is not None else None,
+            'cluster_categories': cluster_categories,
+        }
+
     def spatialgraph_embedding(
         self,
         n_dim: int,
@@ -1118,6 +1156,8 @@ class Phenocoder:
         n_neighbors: int = 15,
         umap: bool = True,
         obs_keys: str | list[str] | None = None,
+        save_transform: bool = False,
+        transform_path: str | Path | None = None,
     ) -> None:
         """
         Generate spatial graph embeddings from all samples.
@@ -1125,6 +1165,11 @@ class Phenocoder:
         Creates low-dimensional embeddings that capture spatial relationships
         between nuclei across all samples in the dataset. This can be used
         for sample-level comparisons and spatial pattern analysis.
+
+        This is the **fit** path: the scaler, PCA and UMAP are fitted on whatever samples
+        ``self.adata`` holds. Pass ``save_transform=True`` to persist them, then project new
+        samples into that frozen space with
+        :meth:`~phenocoder.Phenocoder.spatialgraph_map_query` instead of re-running this.
 
         Args:
             n_dim (int): Number of principal components to compute.
@@ -1146,6 +1191,13 @@ class Phenocoder:
                 can be colored by them. Each value is taken per sample via
                 ``groupby(sample_key).first()`` and must be constant within a sample.
                 Defaults to None.
+            save_transform (bool, optional): Persist the fitted scaler/PCA/UMAP so new
+                samples can later be projected into this exact space. Switches scaling and
+                PCA from scanpy to the equivalent sklearn estimators (see Note). Requires
+                ``spatialgraph_stats`` to have been run in this session, and is incompatible
+                with ``batch_correction``. Defaults to False.
+            transform_path (str | Path | None, optional): Where to write the transform.
+                Defaults to ``project_dir/reference/embedding_transform.joblib``.
 
         Returns:
             None
@@ -1154,6 +1206,15 @@ class Phenocoder:
             ValueError: If self.adata is None or not set.
             ValueError: If batch_correction=True but batch_key is None.
             ValueError: If batch_key is not found in adata.obs or sdata.tables.
+            ValueError: If save_transform=True together with batch_correction=True, or
+                without a preceding spatialgraph_stats() call.
+
+        Note:
+            ``save_transform=True`` changes the numbers slightly. Scaling switches from
+            ``sc.pp.scale`` (ddof=1) to ``StandardScaler`` (ddof=0), a factor of
+            ``sqrt(n/(n-1))`` per feature -- 2.6% at 20 samples. PCA *directions* are
+            unaffected, absolute coordinates are not, so embeddings fitted with and without
+            ``save_transform`` are not directly comparable.
 
         Note:
             Results are stored in self.adata with:
@@ -1175,6 +1236,29 @@ class Phenocoder:
             raise ValueError(
                 'self.adata is None. Run spatialgraph_stats() first to compute '
                 'spatial statistics before generating embeddings.'
+            )
+
+        if save_transform and batch_correction:
+            # bbknn.ridge_regression mutates .X before PCA and is inherently pooled -- there
+            # is no transform-only form, so a saved space could not be reproduced for a
+            # query. Leave the reference uncorrected; the batch effect then shows up as a
+            # shift in the projected coordinates, which is usually the quantity of interest.
+            raise ValueError(
+                'save_transform=True is incompatible with batch_correction=True: '
+                'bbknn.ridge_regression has no transform-only form, so the fitted space '
+                'could not be applied to a query.'
+            )
+        if save_transform and variable_features:
+            # sc.pp.highly_variable_genes sets a mask scanpy's PCA consumes; the sklearn
+            # path below would silently ignore it and fit on all features.
+            raise ValueError(
+                'save_transform=True does not support variable_features=True.'
+            )
+        if save_transform and self.stats_config is None:
+            raise ValueError(
+                'save_transform requires spatialgraph_stats() to have been run in this '
+                'session, so the radii/stats/cluster labels behind these features are '
+                'known and can be validated against at query time.'
             )
 
         # Carry per-sample metadata (e.g. condition groups) into adata.obs so the
@@ -1215,9 +1299,18 @@ class Phenocoder:
         # Store raw data
         self.adata.layers['raw'] = self.adata.X.copy()
 
-        # Scale data
+        # Scale data. When the fitted space is to be saved, use a StandardScaler so there is
+        # an object to persist -- sc.pp.scale writes in place and keeps nothing. NOTE the two
+        # are not numerically identical: scanpy uses ddof=1, sklearn ddof=0, a factor of
+        # sqrt(n/(n-1)) on every feature. PCA directions are unaffected; absolute coordinates
+        # are not. Only the save path takes the sklearn branch, so default output is unchanged.
+        scaler = None
         if scale:
-            sc.pp.scale(self.adata)
+            if save_transform:
+                scaler = StandardScaler()
+                self.adata.X = scaler.fit_transform(self.adata.X)
+            else:
+                sc.pp.scale(self.adata)
             self.adata.X[np.isnan(self.adata.X)] = 0
 
         # Handle batch correction metadata
@@ -1303,11 +1396,19 @@ class Phenocoder:
 
         # Compute PCA. ``mask_var`` replaces the deprecated ``use_highly_variable``
         # argument: "highly_variable" restricts PCA to HVGs, None uses all features.
-        sc.pp.pca(
-            self.adata,
-            n_comps=n_dim,
-            mask_var='highly_variable' if variable_features else None,
-        )
+        pca_model = None
+        if save_transform:
+            # sklearn's PCA reproduces sc.pp.pca to ~1e-6 on the same matrix, and unlike
+            # scanpy leaves behind an object that can project new data. Keep 'arpack' to
+            # match scanpy's solver.
+            pca_model = PCA(n_components=n_dim, svd_solver='arpack', random_state=0)
+            self.adata.obsm['X_pca'] = pca_model.fit_transform(self.adata.X)
+        else:
+            sc.pp.pca(
+                self.adata,
+                n_comps=n_dim,
+                mask_var='highly_variable' if variable_features else None,
+            )
 
         if batch_correction:
             bbknn.bbknn(
@@ -1316,5 +1417,127 @@ class Phenocoder:
         else:
             sc.pp.neighbors(self.adata, n_neighbors=n_neighbors, use_rep='X_pca')
 
+        umap_model = None
         if umap:
-            sc.tl.umap(self.adata, n_components=2, min_dist=0.1)
+            if save_transform:
+                # scanpy does not expose the fitted UMAP, so drive umap-learn directly.
+                # random_state is pinned: with it, transform() reproduces fit_transform on
+                # the reference points exactly, which is what makes the saved space stable.
+                umap_model = UMAP(
+                    n_components=2,
+                    min_dist=0.1,
+                    n_neighbors=n_neighbors,
+                    random_state=0,
+                )
+                self.adata.obsm['X_umap'] = umap_model.fit_transform(
+                    self.adata.obsm['X_pca']
+                )
+            else:
+                sc.tl.umap(self.adata, n_components=2, min_dist=0.1)
+
+        if save_transform:
+            path = save_reference_transform(
+                transform_path if transform_path is not None else self.reference_dir,
+                scaler=scaler,
+                pca=pca_model,
+                umap_model=umap_model,
+                var_names=self.adata.var_names.tolist(),
+                cluster_key=self.stats_config['cluster_key'],
+                cluster_categories=self.stats_config['cluster_categories'],
+                radii=self.stats_config['radii'],
+                stats_groups=self.stats_config['stats'],
+                scale=scale,
+            )
+            print(f'Saved embedding transform to {path}')
+
+    def spatialgraph_map_query(
+        self,
+        transform_path: str | Path | None = None,
+        umap: bool = True,
+        allow_extra: bool = True,
+        validate_config: bool = True,
+        clip: float | None = 10.0,
+    ) -> None:
+        """
+        Project this object's statistics into a saved reference embedding space.
+
+        Transform-only: the stored scaler, PCA and UMAP are applied as fitted, so the
+        reference space is unchanged by whatever the query contains. Use this instead of
+        :meth:`~phenocoder.Phenocoder.spatialgraph_embedding` when the axes must stay
+        fixed -- for example projecting experimental samples into a space built from a
+        simulation parameter sweep.
+
+        Run :meth:`~phenocoder.Phenocoder.spatialgraph_stats` first, with the same
+        ``cluster_key``, ``radii`` and ``stats`` used to build the reference.
+
+        Args:
+            transform_path (str | Path | None, optional): Transform to load. Defaults to
+                ``project_dir/reference/embedding_transform.joblib``.
+            umap (bool, optional): Also project into the reference UMAP, if one was saved.
+                Defaults to True.
+            allow_extra (bool, optional): Drop query-only features (ones the reference has
+                no PCA loading for, so they cannot be projected) with a warning. Pass False
+                to make them a hard error instead. Defaults to True.
+            validate_config (bool, optional): Check the query's ``cluster_key``/``radii``/
+                ``stats`` and cluster label set against the reference's. Defaults to True.
+            clip (float | None, optional): Clip scaled values to +/- this many standard
+                deviations before projecting, bounding the influence of features that barely
+                varied in the reference. Pass None to disable. Defaults to 10.0.
+
+        Returns:
+            None: Coordinates are written to ``self.adata.obsm['X_pca']`` and, when
+                available, ``self.adata.obsm['X_umap']``. The unscaled statistics are kept
+                in ``.layers['raw']``.
+
+        Raises:
+            ValueError: If ``self.adata`` is unset, if the query's features cannot be
+                aligned to the reference's, or if the stats configuration differs.
+            FileNotFoundError: If no transform exists at ``transform_path``.
+
+        Note:
+            Reference points re-projected through the saved UMAP land exactly where they did
+            at fit time, but query points are placed by UMAP's approximate ``transform`` and
+            are best treated as a visualization. Use the PCA coordinates for quantitative
+            comparison.
+
+        Example:
+            >>> query.spatialgraph_stats(cluster_key='leiden', radii=(25, 50))
+            >>> query.spatialgraph_map_query('ref/reference/embedding_transform.joblib')
+            >>> query.adata.obsm['X_pca']  # in reference coordinates
+        """
+        if self.adata is None:
+            raise ValueError(
+                'self.adata is None. Run spatialgraph_stats() first to compute the '
+                'statistics to project.'
+            )
+
+        payload = load_transform(
+            transform_path if transform_path is not None else self.reference_dir
+        )
+
+        if validate_config:
+            if self.stats_config is None:
+                warnings.warn(
+                    'No stats_config on this object (spatialgraph_stats was not run in '
+                    'this session), so the query configuration cannot be checked against '
+                    'the reference. Feature alignment is still enforced.',
+                    stacklevel=2,
+                )
+            else:
+                check_stats_config(
+                    payload,
+                    cluster_key=self.stats_config['cluster_key'],
+                    radii=self.stats_config['radii'],
+                    stats_groups=self.stats_config['stats'],
+                    cluster_categories=self.stats_config['cluster_categories'],
+                )
+
+        df = self.adata.to_df()
+        X_pca, X_umap = apply_transform(
+            df, payload, allow_extra=allow_extra, umap=umap, clip=clip
+        )
+
+        self.adata.layers['raw'] = self.adata.X.copy()
+        self.adata.obsm['X_pca'] = X_pca
+        if X_umap is not None:
+            self.adata.obsm['X_umap'] = X_umap
