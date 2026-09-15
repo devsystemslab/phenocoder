@@ -549,6 +549,10 @@ class DatasetLoader:
         Args:
             batch_size (int): Batch size used to drop the remainder so each split is batch-aligned. Defaults to 64.
             split (float): Fraction of samples assigned to the training split. Defaults to 0.8.
+
+        Raises:
+            ValueError: If a split holds fewer than ``batch_size`` patches, leaving it with no
+                complete batch.
         """
         self.load_datasets()
         self.patches = self.patches.sample(frac=1, random_state=42, replace=False)
@@ -566,16 +570,33 @@ class DatasetLoader:
             on=[self.sample_key, 'dataset'],
             how='left',
         )
-        # drop remainders of splits regarding batch_size
-        self.patches = (
-            self.patches.groupby('split', group_keys=True)
-            .apply(
-                lambda x: x.iloc[: -(x.shape[0] % batch_size)],
-                include_groups=False,
+        # Drop each split's remainder so it is a whole number of batches. SequenceGenerator
+        # floors len(ids)/batch_size and so never yields a partial batch anyway; this keeps
+        # `patches` consistent with what actually gets trained on.
+        #
+        # NB `iloc[:n - n % batch_size]`, not `iloc[:-(n % batch_size)]`: when the remainder
+        # is 0 the latter is `iloc[:0]`, which silently discards the entire split -- the
+        # exactly-batch-aligned case became the worst case.
+        before = self.patches.groupby('split').size()
+        counts = self.patches.groupby('split')['split'].transform('size')
+        keep = self.patches.groupby('split').cumcount() < (counts - counts % batch_size)
+        self.patches = self.patches[keep].reset_index(drop=True)
+
+        # A split with fewer patches than batch_size truncates to nothing. Left alone this
+        # surfaces much later as an opaque pandas or Keras error on an empty generator, so
+        # say what happened here.
+        after = self.patches.groupby('split').size()
+        starved = {
+            name: int(before.get(name, 0))
+            for name in ('train', 'val')
+            if int(after.get(name, 0)) == 0
+        }
+        if starved:
+            raise ValueError(
+                f'batch_size={batch_size} leaves no complete batch for split(s) '
+                f'{starved} (name: patches available). Training would receive no data. '
+                f'Use a smaller batch_size, or generate more patches.'
             )
-            .reset_index(level=0)
-            .reset_index(drop=True)
-        )
         # expand files to complete paths
         self.patches['file_path'] = self.patches.apply(
             lambda x: Path(self.dataset_dirs[x['dataset']], x['file']), axis=1

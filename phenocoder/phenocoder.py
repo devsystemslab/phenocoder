@@ -436,7 +436,9 @@ class Phenocoder:
             sample_key=self.sample_key,
         )
         self.data_loader.load_datasets()
-        self.data_loader.set_train_val_split()
+        # Pass batch_size through: the split truncation and the generators must agree on it,
+        # or patches are dropped to align with 64 while batching happens at another size.
+        self.data_loader.set_train_val_split(batch_size=batch_size)
 
         self.model_config = {
             'n_latent_dim': n_latent_dim,
@@ -463,6 +465,7 @@ class Phenocoder:
                 self.model_oh_enc,
             ) = self.data_loader.get_generators(
                 conditions=conditions,
+                batch_size=batch_size,
                 dim=input_shape[:2],
                 n_channels=input_shape[-1],
                 flip=flip,
@@ -478,6 +481,7 @@ class Phenocoder:
         else:
             self.data_generator_train, self.data_generator_val = (
                 self.data_loader.get_generators(
+                    batch_size=batch_size,
                     dim=input_shape[:2],
                     n_channels=input_shape[-1],
                     flip=flip,

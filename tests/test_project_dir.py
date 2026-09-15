@@ -121,25 +121,56 @@ def test_load_model_then_encode():
         shutil.rmtree('tests/data/tmp', ignore_errors=True)
 
 
-def test_config_yaml_has_no_absolute_dataset_path():
-    """config.yaml stores dataset *names*, so a project directory stays relocatable."""
+def test_batch_size_reaches_split_and_generators():
+    """Regression: initialize_model called set_train_val_split() with no arguments.
+
+    The split truncation always used the default 64 while the generators batched at the
+    configured size, so a non-default batch_size dropped patches to align with the wrong
+    number -- and a small dataset was emptied outright.
+    """
     pheno = example_3d()
     pheno.project_dir = 'tests/data/tmp'
     try:
-        # NB: no n_patches here. set_train_val_split truncates each split to a whole
-        # number of batches, so a dataset smaller than batch_size (64) empties both
-        # splits and initialize_model fails inside pandas. Pre-existing, unrelated to
-        # project_dir; just don't trip over it here.
         pheno.generate_dataset(
             dataset='dataset_1',
             patch_size=(32, 32),
             spatial_key_index='spatial_index',
+            n_patches=40,
         )
         pheno.initialize_model(
             n_latent_dim=8,
             n_dense_dim=16,
             conditions=[],
             input_shape=(32, 32, 4),
+            batch_size=8,
+        )
+        # every split is a whole number of batches at the *configured* size
+        sizes = pheno.data_loader.patches.groupby('split').size()
+        assert all(n % 8 == 0 for n in sizes)
+        assert pheno.data_generator_train.batch_size == 8
+        assert len(pheno.data_generator_train) > 0
+    finally:
+        shutil.rmtree('tests/data/tmp', ignore_errors=True)
+
+
+def test_config_yaml_has_no_absolute_dataset_path():
+    """config.yaml stores dataset *names*, so a project directory stays relocatable."""
+    pheno = example_3d()
+    pheno.project_dir = 'tests/data/tmp'
+    try:
+        pheno.generate_dataset(
+            dataset='dataset_1',
+            patch_size=(32, 32),
+            spatial_key_index='spatial_index',
+            n_patches=64,
+        )
+        # batch_size=8 so this small dataset still forms complete batches
+        pheno.initialize_model(
+            n_latent_dim=8,
+            n_dense_dim=16,
+            conditions=[],
+            input_shape=(32, 32, 4),
+            batch_size=8,
         )
         assert pheno.model_config['datasets'] == ['dataset_1']
         assert pheno.model_config['dataset_dirs'] == {}
