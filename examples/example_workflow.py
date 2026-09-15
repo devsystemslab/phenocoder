@@ -148,14 +148,13 @@ def build_example_sdata() -> sd.SpatialData:
 
 def main() -> None:
     """Run the full Phenocoder pipeline on the bundled example dataset."""
-    dir_dataset = "examples/output/phenocoder"
-
     # --- Configure Phenocoder --------------------------------------------
     sdata = build_example_sdata()
     pheno = phc.Phenocoder(
         table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
         sample_key="well",            # obs column identifying each sample
         image_key="IF",               # images are stored as f"{image_key}_{sample}"
+        project_dir="examples/output/phenocoder",  # root for all artifacts
     )
     pheno.add_sdata(sdata)
     print(pheno)
@@ -164,7 +163,6 @@ def main() -> None:
     print("\n[1/6] Generating patch dataset ...")
     pheno.generate_dataset(
         dataset="dataset_1",
-        dir_dataset=dir_dataset,
         patch_size=(32, 32),
         spatial_key_index="spatial_index",
     )

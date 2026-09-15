@@ -343,7 +343,7 @@ class PatchGenerator:
     def generate_dataset(
         self,
         dataset: str,
-        dir_output: str,
+        dir_dataset: str | Path,
         n_samples: int = None,
         n_patches: int = None,
     ) -> None:
@@ -352,13 +352,13 @@ class PatchGenerator:
 
         Args:
             dataset (str): Name/identifier for the dataset being generated
-            dir_output (str): Directory path for storing the generated dataset
+            dir_dataset (str | Path): Directory to write this dataset into. Already fully
+                resolved by the caller (``Phenocoder.dataset_dir``) -- the dataset name is
+                *not* appended here.
             n_samples (int, optional): Number of samples to randomly select for processing. If None, processes all samples.
             n_patches (int, optional): Number of patches to randomly sample from all available patches. If None, uses all patches.
         """
-        self.dir_output = Path(dir_output)
-        self.dir_dataset = Path(dir_output, dataset)
-        self.dir_output.mkdir(exist_ok=True, parents=True)
+        self.dir_dataset = Path(dir_dataset)
         self.dir_dataset.mkdir(exist_ok=True, parents=True)
         self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
         if n_samples is not None:
@@ -505,16 +505,18 @@ class DatasetLoader:
     provides unified access to files and scaling parameters.
     """
 
-    def __init__(self, datasets: list, dir_datasets: str, sample_key: str):
+    def __init__(self, datasets: list, dataset_dirs: dict, sample_key: str):
         """
         Initialize DatasetLoader.
 
         Args:
             datasets (list): List of dataset names to merge
-            dir_datasets (str): Base directory containing dataset subdirectories
+            dataset_dirs (dict): Mapping of dataset name -> directory holding that dataset's
+                ``patches.csv`` / ``stats.csv`` / patch ``.npy`` files. Resolved by the caller
+                (``Phenocoder.dataset_dir``) so datasets may live outside the project root.
             sample_key (str): obs column used to group patches into samples for the train/val split
         """
-        self.dir_datasets = dir_datasets
+        self.dataset_dirs = {name: Path(path) for name, path in dataset_dirs.items()}
         self.datasets = datasets
         self.sample_key = sample_key
         self.stats_imgs = None
@@ -530,12 +532,9 @@ class DatasetLoader:
         self.stats = []
         self.patches = []
         for dataset in self.datasets:
-            self.stats.append(
-                pd.read_csv(Path(self.dir_datasets, dataset, 'stats.csv'))
-            )
-            self.patches.append(
-                pd.read_csv(Path(self.dir_datasets, dataset, 'patches.csv'))
-            )
+            dir_dataset = self.dataset_dirs[dataset]
+            self.stats.append(pd.read_csv(Path(dir_dataset, 'stats.csv')))
+            self.patches.append(pd.read_csv(Path(dir_dataset, 'patches.csv')))
         self.stats = pd.concat(self.stats)
         self.patches = pd.concat(self.patches)
 
@@ -579,12 +578,12 @@ class DatasetLoader:
         )
         # expand files to complete paths
         self.patches['file_path'] = self.patches.apply(
-            lambda x: Path(self.dir_datasets, x['dataset'], x['file']), axis=1
+            lambda x: Path(self.dataset_dirs[x['dataset']], x['file']), axis=1
         )
 
     def get_generators(
         self,
-        conditions: list[str],
+        conditions: list[str] | None = None,
         batch_size: int = 64,
         dim: tuple[int, int] = (128, 128),
         n_channels: int = 4,
@@ -599,8 +598,8 @@ class DatasetLoader:
         ``file_path`` columns).
 
         Args:
-            conditions (list of str): obs/patch columns to one-hot encode and feed as conditions. If empty, plain
-                (non-conditional) generators are returned
+            conditions (list of str, optional): obs/patch columns to one-hot encode and feed as
+                conditions. If empty or None, plain (non-conditional) generators are returned
             batch_size (int): Number of patches per batch. Defaults to 64.
             dim (tuple): Spatial (height, width) of patches. Defaults to (128, 128).
             n_channels (int): Number of image channels. Defaults to 4.

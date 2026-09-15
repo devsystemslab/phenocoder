@@ -31,6 +31,18 @@ class Phenocoder:
     autoencoders. It supports both conditional and non-conditional models, and integrates with
     SpatialData objects for handling spatial omics data.
 
+    All artifacts produced by a Phenocoder run live under a single ``project_dir``::
+
+        project_dir/
+        ├── <dataset>/              patches.csv, stats.csv, *.npy
+        ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
+        ├── tensorboard_logs/<model_name>/
+        ├── reference/              saved spatial-graph embedding transforms
+        └── zarr/                   conventional location for the SpatialData store
+
+    ``project_dir`` can be set directly in the constructor, which is what a workflow that
+    never extracts image patches (e.g. a simulation-derived reference) needs.
+
     Attributes:
         sdata (SpatialData | None): The SpatialData object containing spatial omics data.
         adata (AnnData | None): AnnData object (deprecated, data should be in sdata.tables).
@@ -39,19 +51,24 @@ class Phenocoder:
         model_oh_enc: One-hot encoder for conditional model inputs.
         model_config (dict | None): Configuration parameters for the model.
         sample_key (str | None): The key for identifying samples in the SpatialData object.
-        data_dir (str | Path | None): Directory path for dataset storage.
+        project_dir (Path | None): Root directory for all artifacts (see layout above).
+        datasets (list[str] | None): Names of the generated datasets.
+        dataset_dirs (dict[str, Path]): Per-dataset directory overrides, for datasets stored
+            outside ``project_dir``. Datasets not listed here live at ``project_dir/<name>``.
         data_generator_train: Training data generator for model training.
         data_generator_val: Validation data generator for model training.
         df_conditions (DataFrame | None): DataFrame containing condition information for conditional models.
 
     Example:
         >>> phenocoder = Phenocoder(
-        ...     table_key="nuclei_features", sample_key="well", image_key="IF"
+        ...     table_key="nuclei_features",
+        ...     sample_key="well",
+        ...     image_key="IF",
+        ...     project_dir="data/phenocoder",
         ... )
         >>> phenocoder.add_sdata(sdata)
         >>> phenocoder.generate_dataset(
         ...     dataset="dataset_1",
-        ...     dir_dataset="data/phenocoder",
         ...     spatial_key_index="spatial_index",
         ... )
         >>> phenocoder.initialize_model(n_latent_dim=64, n_dense_dim=256, conditions=[])
@@ -74,8 +91,11 @@ class Phenocoder:
                 - sample_key: key used to identify samples in sdata tables
                 - spatial_key: spatial key name/index
                 - table_key: table key in sdata.tables
-                - data_dir: base directory for datasets
+                - project_dir: root directory for all artifacts (datasets, models,
+                  tensorboard logs, reference transforms, zarr store)
                 - datasets: list of dataset identifiers
+                - dataset_dirs: mapping of dataset name -> directory, for datasets stored
+                  outside project_dir
                 - data_generator_train: training data generator
                 - data_generator_val: validation data generator
                 - df_conditions: DataFrame of condition labels
@@ -101,8 +121,12 @@ class Phenocoder:
         self.image_key: str | None = kwargs.get('image_key', None)
 
         # Dataset and generator related
-        self.data_dir: str | Path | None = kwargs.get('data_dir', None)
+        self.project_dir = kwargs.get('project_dir', None)
         self.datasets: list[str] | None = kwargs.get('datasets', None)
+        self.dataset_dirs: dict[str, Path] = {
+            name: Path(path)
+            for name, path in (kwargs.get('dataset_dirs', None) or {}).items()
+        }
         self.data_generator_train = kwargs.get('data_generator_train', None)
         self.data_generator_val = kwargs.get('data_generator_val', None)
         self.df_conditions = kwargs.get('df_conditions', None)
@@ -112,6 +136,56 @@ class Phenocoder:
         self.model_name: str | None = kwargs.get('model_name', None)
         self.dir_tensorboard: Path | None = kwargs.get('dir_tensorboard', None)
         self.data_loader = kwargs.get('data_loader', None)
+
+    @property
+    def project_dir(self) -> Path | None:
+        """Path | None: Root directory for all artifacts. Coerced to ``Path`` on assignment."""
+        return self._project_dir
+
+    @project_dir.setter
+    def project_dir(self, value: str | Path | None) -> None:
+        self._project_dir = Path(value) if value is not None else None
+
+    def require_project_dir(self) -> Path:
+        """
+        Return ``self.project_dir``, raising a helpful error if it is unset.
+
+        Returns:
+            Path: The project root directory.
+
+        Raises:
+            ValueError: If ``project_dir`` has not been set.
+        """
+        if self.project_dir is None:
+            raise ValueError(
+                'project_dir must be set, either in the constructor '
+                "(Phenocoder(project_dir='...')) or by assignment."
+            )
+        return self.project_dir
+
+    def dataset_dir(self, dataset: str) -> Path:
+        """
+        Resolve the directory holding a dataset's ``patches.csv`` / ``stats.csv`` / patches.
+
+        Datasets live at ``project_dir/<dataset>`` unless an explicit override was
+        registered in ``self.dataset_dirs`` (see ``generate_dataset``). This is the single
+        place dataset paths are resolved; ``initialize_model``, ``encode`` and
+        ``DatasetLoader`` all go through it.
+
+        Args:
+            dataset (str): Dataset name.
+
+        Returns:
+            Path: Directory containing that dataset.
+        """
+        if dataset in self.dataset_dirs:
+            return Path(self.dataset_dirs[dataset])
+        return Path(self.require_project_dir(), dataset)
+
+    @property
+    def reference_dir(self) -> Path:
+        """Path: Directory holding saved spatial-graph embedding transforms."""
+        return Path(self.require_project_dir(), 'reference')
 
     def __repr__(self) -> str:
         """
@@ -153,6 +227,10 @@ class Phenocoder:
         if config_info:
             lines.append(f'config: {", ".join(config_info)}')
 
+        # Project root
+        if self.project_dir is not None:
+            lines.append(f'project_dir: {self.project_dir}')
+
         # Dataset info
         if self.datasets is not None and len(self.datasets) > 0:
             lines.append(f'datasets: {len(self.datasets)} dataset(s)')
@@ -179,7 +257,7 @@ class Phenocoder:
     def generate_dataset(
         self,
         dataset: str,
-        dir_dataset: str | Path,
+        dataset_dir: str | Path | None = None,
         patch_size: tuple[int, int] = (128, 128),
         spatial_key_index: str | None = None,
         scale: bool = True,
@@ -198,7 +276,11 @@ class Phenocoder:
 
         Args:
             dataset (str): Name/identifier for the dataset being generated.
-            dir_dataset (str | Path): Directory path for storing the generated dataset.
+            dataset_dir (str | Path | None, optional): Where to write this dataset. Defaults to
+                ``project_dir/<dataset>``, which is what you want unless the patches need to
+                live elsewhere (a scratch disk, or a dataset shared read-only between
+                projects). Passing it registers an override in ``self.dataset_dirs`` for this
+                dataset only and does **not** change ``self.project_dir``.
             patch_size (tuple[int, int], optional): Patch (height, width) extracted around each
                 object. Must match the height/width of the model's input_shape. Defaults to (128, 128).
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
@@ -218,21 +300,32 @@ class Phenocoder:
         Returns:
             None
 
+        Raises:
+            ValueError: If neither ``project_dir`` nor ``dataset_dir`` is set.
+
         Example:
             >>> phenocoder.generate_dataset(
             ...     dataset="experiment_001",
-            ...     dir_dataset="/path/to/datasets",
             ...     patch_size=(32, 32),
             ...     spatial_key_index="spatial_index",
             ... )
         """
         if spatial_key_index is None:
             spatial_key_index = self.spatial_key
-        self.data_dir = dir_dataset
+
+        if dataset_dir is not None:
+            self.dataset_dirs[dataset] = Path(dataset_dir)
+        elif self.project_dir is None:
+            raise ValueError(
+                'Set project_dir (e.g. Phenocoder(project_dir=...)) or pass '
+                'dataset_dir to generate_dataset().'
+            )
+
+        # `datasets` records names; the same dataset regenerated must not be listed twice.
         if self.datasets is None:
-            self.datasets = [dataset]
-        else:
-            self.datasets = self.datasets.append(dataset)
+            self.datasets = []
+        if dataset not in self.datasets:
+            self.datasets.append(dataset)
         self.patch_generator = PatchGenerator(
             sdata=self.sdata,
             sample_key=self.sample_key,
@@ -246,7 +339,10 @@ class Phenocoder:
             scale_per_sample=scale_per_sample,
         )
         self.patch_generator.generate_dataset(
-            dataset, dir_output=self.data_dir, n_samples=n_samples, n_patches=n_patches
+            dataset,
+            dir_dataset=self.dataset_dir(dataset),
+            n_samples=n_samples,
+            n_patches=n_patches,
         )
 
     def initialize_model(
@@ -290,7 +386,7 @@ class Phenocoder:
             None
 
         Raises:
-            ValueError: If data_dir is not specified.
+            ValueError: If project_dir is not specified.
             ValueError: If datasets is not specified.
 
         Example:
@@ -314,16 +410,15 @@ class Phenocoder:
         self.model_name = f'latent_{n_latent_dim}_dense_{n_dense_dim}_dropout_{dropout}_beta_{beta}_{pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")}'
         if conditions:
             self.model_name = f'cond_{self.model_name}'
-        if self.data_dir is None:
-            raise ValueError('.data_dir must be specified')
-        if self.datasets is None:
+        project_dir = self.require_project_dir()
+        if not self.datasets:
             raise ValueError('.datasets must be specified')
-        self.model_dir = Path(self.data_dir, 'models', self.model_name)
+        self.model_dir = Path(project_dir, 'models', self.model_name)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
         self.data_loader = DatasetLoader(
             datasets=self.datasets,
-            dir_datasets=self.data_dir,
+            dataset_dirs={ds: self.dataset_dir(ds) for ds in self.datasets},
             sample_key=self.sample_key,
         )
         self.data_loader.load_datasets()
@@ -335,7 +430,13 @@ class Phenocoder:
             'input_shape': list(input_shape),
             'conv_layers': list(conv_layers),
             'dropout': dropout,
-            'dir_dataset': self.data_dir,
+            # Dataset *names*; resolved against project_dir at load time so a project
+            # directory stays relocatable. Only genuine out-of-tree overrides are stored
+            # as paths, in `dataset_dirs`.
+            'datasets': list(self.datasets),
+            'dataset_dirs': {
+                name: str(path) for name, path in self.dataset_dirs.items()
+            },
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
@@ -404,6 +505,11 @@ class Phenocoder:
         Reconstructs the model architecture from saved configuration and loads
         the trained weights. Also loads the one-hot encoder for conditional models.
 
+        ``project_dir``, ``datasets`` and ``dataset_dirs`` are restored from the config's
+        location and contents, so a loaded model can be used with ``encode`` directly. The
+        config lives at ``project_dir/models/<model_name>/config.yaml``, so the project root
+        is recovered from the path rather than stored, keeping the directory relocatable.
+
         Returns:
             None
 
@@ -419,6 +525,15 @@ class Phenocoder:
 
         with open(self.model_config, 'r') as file:
             self.model_config = yaml.load(file, Loader=yaml.FullLoader)
+
+        # project_dir/models/<model_name>/config.yaml -> project_dir
+        if self.project_dir is None:
+            self.project_dir = config_path.parent.parent.parent
+        # Restore dataset bookkeeping; `encode` iterates these to find patches.csv/stats.csv.
+        if self.model_config.get('datasets'):
+            self.datasets = list(self.model_config['datasets'])
+        for name, path in (self.model_config.get('dataset_dirs') or {}).items():
+            self.dataset_dirs.setdefault(name, Path(path))
 
         if self.model_config['conditional']:
             self.model = CondCVAE(
@@ -506,7 +621,9 @@ class Phenocoder:
             ...     plot=True
             ... )
         """
-        self.dir_tensorboard = Path(self.data_dir, 'tensorboard_logs', self.model_name)
+        self.dir_tensorboard = Path(
+            self.require_project_dir(), 'tensorboard_logs', self.model_name
+        )
 
         if not self.dir_tensorboard.exists():
             self.dir_tensorboard.mkdir(parents=True, exist_ok=True)
@@ -622,8 +739,14 @@ class Phenocoder:
                 scale_per_sample=scale_per_sample,
             )
             self.patch_generator.init_patches()
+            if not self.datasets:
+                raise ValueError(
+                    '.datasets is empty -- encode() needs the training datasets to '
+                    'recover per-sample scaling and dataset labels. Set it explicitly, '
+                    'or load a model whose config.yaml records them.'
+                )
             patches_dfs = [
-                pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'patches.csv'))
+                pd.read_csv(Path(self.dataset_dir(ds), 'patches.csv'))
                 for ds in self.datasets
             ]
             patches_meta = pd.concat(patches_dfs, ignore_index=True)
@@ -635,7 +758,7 @@ class Phenocoder:
             ].map(sample_to_dataset)
             if scale:
                 stats_dfs = [
-                    pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'stats.csv'))
+                    pd.read_csv(Path(self.dataset_dir(ds), 'stats.csv'))
                     for ds in self.datasets
                 ]
                 self.patch_generator.df_stats = pd.concat(stats_dfs, ignore_index=True)

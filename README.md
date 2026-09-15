@@ -83,13 +83,13 @@ pheno = Phenocoder(
     table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
     sample_key="well",            # obs column identifying each sample
     image_key="IF",               # images are stored as f"{image_key}_{sample}"
+    project_dir="data/phenocoder",  # root for datasets, models, logs, references
 )
 pheno.add_sdata(sdata)
 
 # 1. Extract patches around each object and write them to disk
 pheno.generate_dataset(
     dataset="dataset_1",
-    dir_dataset="data/phenocoder",
     patch_size=(32, 32),
     spatial_key_index="spatial_index",  # obsm key with (y, x, z) integer coords
 )
