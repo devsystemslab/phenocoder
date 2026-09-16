@@ -85,7 +85,7 @@ def test_phenocoder_generate_dataset_sampling_args():
     """
     n_patches = 8
     pheno = example_3d()
-    pheno.project_dir = Path('tests/data/tmp')
+    pheno.dir_project = Path('tests/data/tmp')
     pheno.generate_dataset(
         dataset='test_dataset',
         spatial_key_index='spatial_index',

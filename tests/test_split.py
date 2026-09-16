@@ -19,7 +19,7 @@ def _loader(counts, batch_size=64):
             for i in range(n)
         ]
     loader = DatasetLoader(
-        datasets=['d1'], dataset_dirs={'d1': '/tmp/d1'}, sample_key='well'
+        datasets=['d1'], dir_datasets={'d1': '/tmp/d1'}, sample_key='well'
     )
     patches = pd.DataFrame(rows)
     loader.load_datasets = lambda: setattr(loader, 'patches', patches.copy())

@@ -1,4 +1,4 @@
-"""Tests for the project_dir layout and the dataset bookkeeping that depends on it."""
+"""Tests for the dir_project layout and the dataset bookkeeping that depends on it."""
 
 import shutil
 from pathlib import Path
@@ -9,51 +9,51 @@ import phenocoder as phc
 from tests.conftest import example_3d
 
 
-def test_project_dir_settable_without_generate_dataset(tmp_path):
-    """project_dir can be set in the constructor.
+def test_dir_project_settable_without_generate_dataset(tmp_path):
+    """dir_project can be set in the constructor.
 
     A workflow with no images (e.g. a simulation-derived reference) never calls
     generate_dataset, which used to be the only thing that set the artifact root.
     """
-    pheno = phc.Phenocoder(table_key='t', sample_key='s', project_dir=tmp_path)
-    assert pheno.project_dir == tmp_path
-    assert pheno.reference_dir == Path(tmp_path, 'reference')
+    pheno = phc.Phenocoder(table_key='t', sample_key='s', dir_project=tmp_path)
+    assert pheno.dir_project == tmp_path
+    assert pheno.dir_reference == Path(tmp_path, 'reference')
     # strings are coerced to Path on assignment
-    pheno.project_dir = str(tmp_path)
-    assert isinstance(pheno.project_dir, Path)
+    pheno.dir_project = str(tmp_path)
+    assert isinstance(pheno.dir_project, Path)
 
 
-def test_require_project_dir_raises_when_unset():
+def test_require_dir_project_raises_when_unset():
     pheno = phc.Phenocoder(table_key='t', sample_key='s')
-    assert pheno.project_dir is None
-    with pytest.raises(ValueError, match='project_dir must be set'):
-        pheno.require_project_dir()
+    assert pheno.dir_project is None
+    with pytest.raises(ValueError, match='dir_project must be set'):
+        pheno.require_dir_project()
 
 
 def test_generate_dataset_requires_a_directory():
-    """Neither project_dir nor dataset_dir set -> a clear error, not a TypeError."""
+    """Neither dir_project nor dir_dataset set -> a clear error, not a TypeError."""
     pheno = example_3d()
-    with pytest.raises(ValueError, match='Set project_dir'):
+    with pytest.raises(ValueError, match='Set dir_project'):
         pheno.generate_dataset(dataset='d1', spatial_key_index='spatial_index')
 
 
-def test_dataset_dir_defaults_under_project_dir(tmp_path):
-    pheno = phc.Phenocoder(table_key='t', sample_key='s', project_dir=tmp_path)
-    assert pheno.dataset_dir('d1') == Path(tmp_path, 'd1')
+def test_dir_dataset_defaults_under_dir_project(tmp_path):
+    pheno = phc.Phenocoder(table_key='t', sample_key='s', dir_project=tmp_path)
+    assert pheno.dir_dataset('d1') == Path(tmp_path, 'd1')
 
 
-def test_dataset_dir_override_is_per_dataset(tmp_path):
-    """An explicit dataset_dir overrides for that dataset only, leaving project_dir alone."""
+def test_dir_dataset_override_is_per_dataset(tmp_path):
+    """An explicit dir_dataset overrides for that dataset only, leaving dir_project alone."""
     outside = tmp_path / 'scratch' / 'patches'
     pheno = phc.Phenocoder(
         table_key='t',
         sample_key='s',
-        project_dir=tmp_path / 'proj',
-        dataset_dirs={'d_out': outside},
+        dir_project=tmp_path / 'proj',
+        dir_datasets={'d_out': outside},
     )
-    assert pheno.dataset_dir('d_out') == outside
-    assert pheno.dataset_dir('d_in') == Path(tmp_path, 'proj', 'd_in')
-    assert pheno.project_dir == Path(tmp_path, 'proj')
+    assert pheno.dir_dataset('d_out') == outside
+    assert pheno.dir_dataset('d_in') == Path(tmp_path, 'proj', 'd_in')
+    assert pheno.dir_project == Path(tmp_path, 'proj')
 
 
 def test_generate_dataset_appends_datasets_without_clobbering():
@@ -62,7 +62,7 @@ def test_generate_dataset_appends_datasets_without_clobbering():
     list.append returns None, so generating a second dataset used to wipe the list.
     """
     pheno = example_3d()
-    pheno.project_dir = 'tests/data/tmp'
+    pheno.dir_project = 'tests/data/tmp'
     try:
         pheno.generate_dataset(
             dataset='ds_a', spatial_key_index='spatial_index', n_patches=4
@@ -89,7 +89,7 @@ def test_load_model_then_encode():
     "TypeError: 'NoneType' is not iterable".
     """
     pheno = example_3d()
-    pheno.project_dir = 'tests/data/tmp'
+    pheno.dir_project = 'tests/data/tmp'
     try:
         pheno.generate_dataset(
             dataset='dataset_1',
@@ -110,8 +110,8 @@ def test_load_model_then_encode():
         loaded.model_config = str(config_path)
         loaded.load_model()
 
-        # project_dir and datasets are recovered from the config's path and contents
-        assert loaded.project_dir == Path('tests/data/tmp')
+        # dir_project and datasets are recovered from the config's path and contents
+        assert loaded.dir_project == Path('tests/data/tmp')
         assert loaded.datasets == ['dataset_1']
 
         loaded.encode(spatial_key_index='spatial_index')
@@ -129,7 +129,7 @@ def test_batch_size_reaches_split_and_generators():
     number -- and a small dataset was emptied outright.
     """
     pheno = example_3d()
-    pheno.project_dir = 'tests/data/tmp'
+    pheno.dir_project = 'tests/data/tmp'
     try:
         pheno.generate_dataset(
             dataset='dataset_1',
@@ -153,10 +153,39 @@ def test_batch_size_reaches_split_and_generators():
         shutil.rmtree('tests/data/tmp', ignore_errors=True)
 
 
+def test_load_model_rejects_pre_rename_config(tmp_path):
+    """An old `dataset_dirs` key must fail loudly, not be silently ignored.
+
+    Reading it with .get('dir_datasets') would resolve those datasets under dir_project
+    instead of their real location.
+    """
+    import yaml
+
+    config = tmp_path / 'models' / 'm' / 'config.yaml'
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        yaml.dump(
+            {
+                'conditional': False,
+                'input_shape': [32, 32, 4],
+                'n_latent_dim': 8,
+                'n_dense_dim': 16,
+                'conv_layers': [8, 16],
+                'datasets': ['d1'],
+                'dataset_dirs': {'d1': '/scratch/d1'},
+            }
+        )
+    )
+    pheno = phc.Phenocoder(table_key='t', sample_key='s')
+    pheno.model_config = str(config)
+    with pytest.raises(ValueError, match='old "dataset_dirs" key'):
+        pheno.load_model()
+
+
 def test_config_yaml_has_no_absolute_dataset_path():
     """config.yaml stores dataset *names*, so a project directory stays relocatable."""
     pheno = example_3d()
-    pheno.project_dir = 'tests/data/tmp'
+    pheno.dir_project = 'tests/data/tmp'
     try:
         pheno.generate_dataset(
             dataset='dataset_1',
@@ -173,7 +202,12 @@ def test_config_yaml_has_no_absolute_dataset_path():
             batch_size=8,
         )
         assert pheno.model_config['datasets'] == ['dataset_1']
-        assert pheno.model_config['dataset_dirs'] == {}
-        assert 'dir_dataset' not in pheno.model_config
+        # only genuine out-of-tree overrides are stored as paths; there are none here
+        assert pheno.model_config['dir_datasets'] == {}
+        # no absolute path anywhere in the persisted config
+        assert not any(
+            isinstance(v, str) and v.startswith('/')
+            for v in pheno.model_config.values()
+        )
     finally:
         shutil.rmtree('tests/data/tmp', ignore_errors=True)

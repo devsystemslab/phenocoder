@@ -353,7 +353,7 @@ class PatchGenerator:
         Args:
             dataset (str): Name/identifier for the dataset being generated
             dir_dataset (str | Path): Directory to write this dataset into. Already fully
-                resolved by the caller (``Phenocoder.dataset_dir``) -- the dataset name is
+                resolved by the caller (``Phenocoder.dir_dataset``) -- the dataset name is
                 *not* appended here.
             n_samples (int, optional): Number of samples to randomly select for processing. If None, processes all samples.
             n_patches (int, optional): Number of patches to randomly sample from all available patches. If None, uses all patches.
@@ -505,18 +505,18 @@ class DatasetLoader:
     provides unified access to files and scaling parameters.
     """
 
-    def __init__(self, datasets: list, dataset_dirs: dict, sample_key: str):
+    def __init__(self, datasets: list, dir_datasets: dict, sample_key: str):
         """
         Initialize DatasetLoader.
 
         Args:
             datasets (list): List of dataset names to merge
-            dataset_dirs (dict): Mapping of dataset name -> directory holding that dataset's
+            dir_datasets (dict): Mapping of dataset name -> directory holding that dataset's
                 ``patches.csv`` / ``stats.csv`` / patch ``.npy`` files. Resolved by the caller
-                (``Phenocoder.dataset_dir``) so datasets may live outside the project root.
+                (``Phenocoder.dir_dataset``) so datasets may live outside the project root.
             sample_key (str): obs column used to group patches into samples for the train/val split
         """
-        self.dataset_dirs = {name: Path(path) for name, path in dataset_dirs.items()}
+        self.dir_datasets = {name: Path(path) for name, path in dir_datasets.items()}
         self.datasets = datasets
         self.sample_key = sample_key
         self.stats_imgs = None
@@ -532,7 +532,7 @@ class DatasetLoader:
         self.stats = []
         self.patches = []
         for dataset in self.datasets:
-            dir_dataset = self.dataset_dirs[dataset]
+            dir_dataset = self.dir_datasets[dataset]
             self.stats.append(pd.read_csv(Path(dir_dataset, 'stats.csv')))
             self.patches.append(pd.read_csv(Path(dir_dataset, 'patches.csv')))
         self.stats = pd.concat(self.stats)
@@ -599,7 +599,7 @@ class DatasetLoader:
             )
         # expand files to complete paths
         self.patches['file_path'] = self.patches.apply(
-            lambda x: Path(self.dataset_dirs[x['dataset']], x['file']), axis=1
+            lambda x: Path(self.dir_datasets[x['dataset']], x['file']), axis=1
         )
 
     def get_generators(

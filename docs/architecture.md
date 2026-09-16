@@ -2,10 +2,10 @@
 
 ## Project layout
 
-Everything a Phenocoder run produces lives under a single `project_dir`:
+Everything a Phenocoder run produces lives under a single `dir_project`:
 
 ```
-project_dir/
+dir_project/
 ├── <dataset>/              patches.csv, stats.csv, *.npy
 ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
 ├── tensorboard_logs/<model_name>/
@@ -16,7 +16,7 @@ project_dir/
 Set it once, in the constructor:
 
 ```python
-pheno = Phenocoder(..., project_dir="data/phenocoder")
+pheno = Phenocoder(..., dir_project="data/phenocoder")
 ```
 
 Setting it up front (rather than as a side effect of `generate_dataset`) matters for
@@ -24,13 +24,13 @@ workflows that never extract image patches — for example a simulation-derived 
 that only runs the spatial-graph steps.
 
 `config.yaml` records dataset *names*, not absolute paths, and
-{meth}`~phenocoder.Phenocoder.load_model` recovers `project_dir` from the config's own
+{meth}`~phenocoder.Phenocoder.load_model` recovers `dir_project` from the config's own
 location. A project directory can therefore be moved or shared without editing anything.
 
-Datasets default to `project_dir/<dataset>`. Pass `dataset_dir=` to
+Datasets default to `dir_project/<dataset>`. Pass `dir_dataset=` to
 {meth}`~phenocoder.Phenocoder.generate_dataset` to place one elsewhere (a scratch disk, or a
 dataset shared read-only between projects); the override is recorded per dataset and does not
-change `project_dir`. `zarr/` is a naming convention only — Phenocoder does not currently read
+change `dir_project`. `zarr/` is a naming convention only — Phenocoder does not currently read
 or write the store itself.
 
 ## CVAE (Convolutional Variational Autoencoder)

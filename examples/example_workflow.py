@@ -154,7 +154,7 @@ def main() -> None:
         table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
         sample_key="well",            # obs column identifying each sample
         image_key="IF",               # images are stored as f"{image_key}_{sample}"
-        project_dir="examples/output/phenocoder",  # root for all artifacts
+        dir_project="examples/output/phenocoder",  # root for all artifacts
     )
     pheno.add_sdata(sdata)
     print(pheno)

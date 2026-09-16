@@ -134,7 +134,7 @@ pheno = Phenocoder(
     table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
     sample_key="well",            # obs column identifying each sample
     image_key="IF",               # images are stored as f"{image_key}_{sample}"
-    project_dir="data/phenocoder",  # root for datasets, models, logs, references
+    dir_project="data/phenocoder",  # root for datasets, models, logs, references
 )
 pheno.add_sdata(sdata)
 ```
@@ -254,7 +254,7 @@ To keep the axes fixed, save the fitted transforms and project new samples throu
 
 ```python
 # Reference (e.g. simulation). Needs no images and no CVAE.
-ref = Phenocoder(table_key="cells", sample_key="sample", project_dir="ref_project")
+ref = Phenocoder(table_key="cells", sample_key="sample", dir_project="ref_project")
 ref.add_sdata(sim_sdata)
 ref.spatialgraph_stats(cluster_key="cell_type", radii=(25, 50))
 ref.spatialgraph_embedding(n_dim=32, scale=True, umap=True, save_transform=True)

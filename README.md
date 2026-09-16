@@ -40,7 +40,7 @@ full workflow on top of it:
   convex-hull statistics at sample or subunit resolution.
 - **Reference mapping**: save a fitted sample-level embedding (e.g. from simulation) and
   project new samples into it, leaving the reference axes fixed.
-- **Single `project_dir`**: datasets, models, tensorboard logs and reference transforms all
+- **Single `dir_project`**: datasets, models, tensorboard logs and reference transforms all
   live under one relocatable root.
 - **Beta-VAE support**: `beta` weights the KL-divergence term against the reconstruction loss,
   tuning the reconstruction-vs-regularization trade-off (higher `beta` → stronger latent
@@ -89,7 +89,7 @@ pheno = Phenocoder(
     table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
     sample_key="well",            # obs column identifying each sample
     image_key="IF",               # images are stored as f"{image_key}_{sample}"
-    project_dir="data/phenocoder",  # root for datasets, models, logs, references
+    dir_project="data/phenocoder",  # root for datasets, models, logs, references
 )
 pheno.add_sdata(sdata)
 

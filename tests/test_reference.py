@@ -69,9 +69,9 @@ def _toy_sdata(n_samples=12, n_per_sample=60, n_clusters=3, seed=0):
     return sdata
 
 
-def _pheno(project_dir, seed=0, **kwargs):
+def _pheno(dir_project, seed=0, **kwargs):
     pheno = phc.Phenocoder(
-        table_key='cells', sample_key='well', project_dir=project_dir
+        table_key='cells', sample_key='well', dir_project=dir_project
     )
     pheno.add_sdata(_toy_sdata(seed=seed, **kwargs))
     return pheno
@@ -119,7 +119,7 @@ def test_identity_roundtrip(tmp_path):
 def test_reference_unchanged_by_query(tmp_path):
     """Projecting a query must not touch the stored transform."""
     ref = _fit_reference(tmp_path)
-    path = ref.reference_dir / 'embedding_transform.joblib'
+    path = ref.dir_reference / 'embedding_transform.joblib'
     before = load_transform(path)
     mean_before = before['scaler'].mean_.copy()
     comps_before = before['pca'].components_.copy()
@@ -385,4 +385,4 @@ def test_default_embedding_still_uses_scanpy(tmp_path):
     assert 'X_umap' in pheno.adata.obsm
     # scanpy's PCA records loadings in varm; the sklearn path does not
     assert 'PCs' in pheno.adata.varm
-    assert not (pheno.reference_dir / 'embedding_transform.joblib').exists()
+    assert not (pheno.dir_reference / 'embedding_transform.joblib').exists()
