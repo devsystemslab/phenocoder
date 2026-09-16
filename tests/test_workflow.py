@@ -8,9 +8,9 @@ from tests.conftest import example_3d
 def test_workflow():
     pheno = example_3d()
     print(pheno)
+    pheno.dir_project = 'tests/data/tmp/phenocoder'
     pheno.generate_dataset(
         dataset='dataset_1',
-        dir_dataset='tests/data/tmp/phenocoder',
         patch_size=(32, 32),
         spatial_key_index='spatial_index',
     )

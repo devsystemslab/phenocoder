@@ -21,6 +21,9 @@ dependencies = [
     "spatialdata-plot>=0.2.12",
     "igraph>=1.0.0",
     "leidenalg>=0.11.0",
+    # Pulled in transitively by scanpy, but phenocoder.phenocoder drives umap.UMAP
+    # directly (scanpy does not expose the fitted model), so declare it.
+    "umap-learn>=0.5.0",
 ]
 
 [project.optional-dependencies]

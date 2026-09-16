@@ -24,6 +24,8 @@ full workflow on top of it:
    spatial subunit) from clustered latents.
 6. **`spatialgraph_embedding`** — embed the per-sample/per-subunit statistics (PCA + UMAP, with
    optional batch correction) for sample-level comparison.
+7. **`spatialgraph_map_query`** — project new samples into a previously saved embedding space
+   without refitting it.
 
 ## Features
 
@@ -36,6 +38,10 @@ full workflow on top of it:
 - **Spatial message passing**: aggregate latents over a physical-distance neighborhood graph.
 - **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity and
   convex-hull statistics at sample or subunit resolution.
+- **Reference mapping**: save a fitted sample-level embedding (e.g. from simulation) and
+  project new samples into it, leaving the reference axes fixed.
+- **Single `dir_project`**: datasets, models, tensorboard logs and reference transforms all
+  live under one relocatable root.
 - **Beta-VAE support**: `beta` weights the KL-divergence term against the reconstruction loss,
   tuning the reconstruction-vs-regularization trade-off (higher `beta` → stronger latent
   regularization; lower `beta` → higher reconstruction fidelity).
@@ -83,13 +89,13 @@ pheno = Phenocoder(
     table_key="nuclei_features",  # table in sdata.tables with per-object obs/obsm
     sample_key="well",            # obs column identifying each sample
     image_key="IF",               # images are stored as f"{image_key}_{sample}"
+    dir_project="data/phenocoder",  # root for datasets, models, logs, references
 )
 pheno.add_sdata(sdata)
 
 # 1. Extract patches around each object and write them to disk
 pheno.generate_dataset(
     dataset="dataset_1",
-    dir_dataset="data/phenocoder",
     patch_size=(32, 32),
     spatial_key_index="spatial_index",  # obsm key with (y, x, z) integer coords
 )
@@ -127,6 +133,28 @@ pheno.spatialgraph_stats(
 # 6. Embed the per-sample statistics for comparison (stored in pheno.adata)
 pheno.spatialgraph_embedding(n_dim=32, scale=True, umap=True)
 ```
+
+### Mapping new samples into a reference space
+
+`spatialgraph_embedding` fits its axes on whatever samples it is given, so pooling in new
+samples moves them. When the reference means something on its own — a space built from a
+simulation parameter sweep, for instance — save the fitted transforms instead and project
+new samples through them:
+
+```python
+# Reference (e.g. simulation): no images or CVAE required
+ref.spatialgraph_stats(cluster_key="cell_type", radii=(25, 50))
+ref.spatialgraph_embedding(n_dim=32, umap=True, save_transform=True)
+
+# Query (experimental): same cluster_key, radii and stats
+query.spatialgraph_stats(cluster_key="cell_type", radii=(25, 50))
+query.spatialgraph_map_query("ref_project/reference/embedding_transform.joblib")
+query.adata.obsm["X_pca"]  # in reference coordinates, which have not moved
+```
+
+Reference and query must share the `cluster_key` label set — transfer the reference labels
+onto the query rather than clustering it independently. See the
+[documentation](https://phenocoder.readthedocs.io) for the full list of caveats.
 
 ### Per-sample vs. global scaling
 

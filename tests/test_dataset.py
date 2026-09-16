@@ -17,8 +17,10 @@ def test_dataset_generator():
         table_key='nuclei_features',
         scale=True,
     )
-    data_generator.generate_dataset(dataset='test_dataset', dir_output='tests/data/tmp')
-    shutil.rmtree(data_generator.dir_output)
+    data_generator.generate_dataset(
+        dataset='test_dataset', dir_dataset='tests/data/tmp/test_dataset'
+    )
+    shutil.rmtree('tests/data/tmp')
 
 
 def test_dataset_generator_n_samples():
@@ -41,7 +43,7 @@ def test_dataset_generator_n_samples():
         scale=True,
     )
     data_generator.generate_dataset(
-        dataset='test_dataset', dir_output='tests/data/tmp', n_samples=1
+        dataset='test_dataset', dir_dataset='tests/data/tmp/test_dataset', n_samples=1
     )
     # only one sample was selected for processing
     assert len(data_generator.samples) == 1
@@ -50,7 +52,7 @@ def test_dataset_generator_n_samples():
     npy_files = list(Path(data_generator.dir_dataset).glob('*.npy'))
     assert len(npy_files) > 0
     assert all(f.name.startswith(f'{selected}_') for f in npy_files)
-    shutil.rmtree(data_generator.dir_output)
+    shutil.rmtree('tests/data/tmp')
 
 
 def test_dataset_generator_n_patches():
@@ -66,11 +68,13 @@ def test_dataset_generator_n_patches():
         scale=True,
     )
     data_generator.generate_dataset(
-        dataset='test_dataset', dir_output='tests/data/tmp', n_patches=n_patches
+        dataset='test_dataset',
+        dir_dataset='tests/data/tmp/test_dataset',
+        n_patches=n_patches,
     )
     patches = pd.read_csv(Path(data_generator.dir_dataset, 'patches.csv'))
     assert patches.shape[0] == n_patches
-    shutil.rmtree(data_generator.dir_output)
+    shutil.rmtree('tests/data/tmp')
 
 
 def test_phenocoder_generate_dataset_sampling_args():
@@ -81,9 +85,9 @@ def test_phenocoder_generate_dataset_sampling_args():
     """
     n_patches = 8
     pheno = example_3d()
+    pheno.dir_project = Path('tests/data/tmp')
     pheno.generate_dataset(
         dataset='test_dataset',
-        dir_dataset='tests/data/tmp',
         spatial_key_index='spatial_index',
         n_patches=n_patches,
     )

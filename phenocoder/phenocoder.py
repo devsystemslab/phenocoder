@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,19 @@ import pandas as pd
 import scanpy as sc
 import spatialdata as sd
 import yaml
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
+from umap import UMAP
 
 from phenocoder.generator import DatasetLoader, PatchGenerator
 from phenocoder.model import CVAE, CondCVAE
+from phenocoder.reference import (
+    apply_transform,
+    check_stats_config,
+    load_transform,
+)
+from phenocoder.reference import save_transform as save_reference_transform
 from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
 from phenocoder.utils import (
     _coerce_stringdtype_uns,
@@ -31,6 +41,18 @@ class Phenocoder:
     autoencoders. It supports both conditional and non-conditional models, and integrates with
     SpatialData objects for handling spatial omics data.
 
+    All artifacts produced by a Phenocoder run live under a single ``dir_project``::
+
+        dir_project/
+        ├── <dataset>/              patches.csv, stats.csv, *.npy
+        ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
+        ├── tensorboard_logs/<model_name>/
+        ├── reference/              saved spatial-graph embedding transforms
+        └── zarr/                   conventional location for the SpatialData store
+
+    ``dir_project`` can be set directly in the constructor, which is what a workflow that
+    never extracts image patches (e.g. a simulation-derived reference) needs.
+
     Attributes:
         sdata (SpatialData | None): The SpatialData object containing spatial omics data.
         adata (AnnData | None): AnnData object (deprecated, data should be in sdata.tables).
@@ -39,19 +61,24 @@ class Phenocoder:
         model_oh_enc: One-hot encoder for conditional model inputs.
         model_config (dict | None): Configuration parameters for the model.
         sample_key (str | None): The key for identifying samples in the SpatialData object.
-        data_dir (str | Path | None): Directory path for dataset storage.
+        dir_project (Path | None): Root directory for all artifacts (see layout above).
+        datasets (list[str] | None): Names of the generated datasets.
+        dir_datasets (dict[str, Path]): Per-dataset directory overrides, for datasets stored
+            outside ``dir_project``. Datasets not listed here live at ``dir_project/<name>``.
         data_generator_train: Training data generator for model training.
         data_generator_val: Validation data generator for model training.
         df_conditions (DataFrame | None): DataFrame containing condition information for conditional models.
 
     Example:
         >>> phenocoder = Phenocoder(
-        ...     table_key="nuclei_features", sample_key="well", image_key="IF"
+        ...     table_key="nuclei_features",
+        ...     sample_key="well",
+        ...     image_key="IF",
+        ...     dir_project="data/phenocoder",
         ... )
         >>> phenocoder.add_sdata(sdata)
         >>> phenocoder.generate_dataset(
         ...     dataset="dataset_1",
-        ...     dir_dataset="data/phenocoder",
         ...     spatial_key_index="spatial_index",
         ... )
         >>> phenocoder.initialize_model(n_latent_dim=64, n_dense_dim=256, conditions=[])
@@ -74,8 +101,9 @@ class Phenocoder:
                 - sample_key: key used to identify samples in sdata tables
                 - spatial_key: spatial key name/index
                 - table_key: table key in sdata.tables
-                - data_dir: base directory for datasets
+                - dir_project: root directory for all artifacts
                 - datasets: list of dataset identifiers
+                - dir_datasets: dataset name -> directory, for out-of-tree datasets
                 - data_generator_train: training data generator
                 - data_generator_val: validation data generator
                 - df_conditions: DataFrame of condition labels
@@ -101,8 +129,12 @@ class Phenocoder:
         self.image_key: str | None = kwargs.get('image_key', None)
 
         # Dataset and generator related
-        self.data_dir: str | Path | None = kwargs.get('data_dir', None)
+        self.dir_project = kwargs.get('dir_project', None)
         self.datasets: list[str] | None = kwargs.get('datasets', None)
+        self.dir_datasets: dict[str, Path] = {
+            name: Path(path)
+            for name, path in (kwargs.get('dir_datasets', None) or {}).items()
+        }
         self.data_generator_train = kwargs.get('data_generator_train', None)
         self.data_generator_val = kwargs.get('data_generator_val', None)
         self.df_conditions = kwargs.get('df_conditions', None)
@@ -112,6 +144,62 @@ class Phenocoder:
         self.model_name: str | None = kwargs.get('model_name', None)
         self.dir_tensorboard: Path | None = kwargs.get('dir_tensorboard', None)
         self.data_loader = kwargs.get('data_loader', None)
+        # How the statistics in self.adata were computed; set by spatialgraph_stats and
+        # used to validate a query against a saved reference space.
+        self.stats_config: dict | None = kwargs.get('stats_config', None)
+
+    @property
+    def dir_project(self) -> Path | None:
+        """Path | None: Root directory for all artifacts. Coerced to ``Path`` on assignment.
+
+        :meta private:
+        """
+        return self._dir_project
+
+    @dir_project.setter
+    def dir_project(self, value: str | Path | None) -> None:
+        self._dir_project = Path(value) if value is not None else None
+
+    def require_dir_project(self) -> Path:
+        """
+        Return ``self.dir_project``, raising a helpful error if it is unset.
+
+        Returns:
+            Path: The project root directory.
+
+        Raises:
+            ValueError: If ``dir_project`` has not been set.
+        """
+        if self.dir_project is None:
+            raise ValueError(
+                'dir_project must be set, either in the constructor '
+                "(Phenocoder(dir_project='...')) or by assignment."
+            )
+        return self.dir_project
+
+    def dir_dataset(self, dataset: str) -> Path:
+        """
+        Resolve the directory holding a dataset's ``patches.csv`` / ``stats.csv`` / patches.
+
+        Datasets live at ``dir_project/<dataset>`` unless an explicit override was
+        registered in ``self.dir_datasets`` (see ``generate_dataset``). This is the single
+        place dataset paths are resolved; ``initialize_model``, ``encode`` and
+        ``DatasetLoader`` all go through it.
+
+        Args:
+            dataset (str): Dataset name.
+
+        Returns:
+            Path: Directory containing that dataset.
+        """
+        if dataset in self.dir_datasets:
+            return Path(self.dir_datasets[dataset])
+        return Path(self.require_dir_project(), dataset)
+
+    @property
+    def dir_reference(self) -> Path:
+        """Path: Directory holding saved spatial-graph embedding transforms."""
+        return Path(self.require_dir_project(), 'reference')
 
     def __repr__(self) -> str:
         """
@@ -153,6 +241,10 @@ class Phenocoder:
         if config_info:
             lines.append(f'config: {", ".join(config_info)}')
 
+        # Project root
+        if self.dir_project is not None:
+            lines.append(f'dir_project: {self.dir_project}')
+
         # Dataset info
         if self.datasets is not None and len(self.datasets) > 0:
             lines.append(f'datasets: {len(self.datasets)} dataset(s)')
@@ -179,7 +271,7 @@ class Phenocoder:
     def generate_dataset(
         self,
         dataset: str,
-        dir_dataset: str | Path,
+        dir_dataset: str | Path | None = None,
         patch_size: tuple[int, int] = (128, 128),
         spatial_key_index: str | None = None,
         scale: bool = True,
@@ -198,7 +290,11 @@ class Phenocoder:
 
         Args:
             dataset (str): Name/identifier for the dataset being generated.
-            dir_dataset (str | Path): Directory path for storing the generated dataset.
+            dir_dataset (str | Path | None, optional): Where to write this dataset. Defaults to
+                ``dir_project/<dataset>``, which is what you want unless the patches need to
+                live elsewhere (a scratch disk, or a dataset shared read-only between
+                projects). Passing it registers an override in ``self.dir_datasets`` for this
+                dataset only and does **not** change ``self.dir_project``.
             patch_size (tuple[int, int], optional): Patch (height, width) extracted around each
                 object. Must match the height/width of the model's input_shape. Defaults to (128, 128).
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
@@ -218,21 +314,32 @@ class Phenocoder:
         Returns:
             None
 
+        Raises:
+            ValueError: If neither ``dir_project`` nor ``dir_dataset`` is set.
+
         Example:
             >>> phenocoder.generate_dataset(
             ...     dataset="experiment_001",
-            ...     dir_dataset="/path/to/datasets",
             ...     patch_size=(32, 32),
             ...     spatial_key_index="spatial_index",
             ... )
         """
         if spatial_key_index is None:
             spatial_key_index = self.spatial_key
-        self.data_dir = dir_dataset
+
+        if dir_dataset is not None:
+            self.dir_datasets[dataset] = Path(dir_dataset)
+        elif self.dir_project is None:
+            raise ValueError(
+                'Set dir_project (e.g. Phenocoder(dir_project=...)) or pass '
+                'dir_dataset to generate_dataset().'
+            )
+
+        # `datasets` records names; the same dataset regenerated must not be listed twice.
         if self.datasets is None:
-            self.datasets = [dataset]
-        else:
-            self.datasets = self.datasets.append(dataset)
+            self.datasets = []
+        if dataset not in self.datasets:
+            self.datasets.append(dataset)
         self.patch_generator = PatchGenerator(
             sdata=self.sdata,
             sample_key=self.sample_key,
@@ -246,7 +353,10 @@ class Phenocoder:
             scale_per_sample=scale_per_sample,
         )
         self.patch_generator.generate_dataset(
-            dataset, dir_output=self.data_dir, n_samples=n_samples, n_patches=n_patches
+            dataset,
+            dir_dataset=self.dir_dataset(dataset),
+            n_samples=n_samples,
+            n_patches=n_patches,
         )
 
     def initialize_model(
@@ -290,7 +400,7 @@ class Phenocoder:
             None
 
         Raises:
-            ValueError: If data_dir is not specified.
+            ValueError: If dir_project is not specified.
             ValueError: If datasets is not specified.
 
         Example:
@@ -314,20 +424,21 @@ class Phenocoder:
         self.model_name = f'latent_{n_latent_dim}_dense_{n_dense_dim}_dropout_{dropout}_beta_{beta}_{pd.Timestamp.now().strftime("%Y%m%d-%H%M%S")}'
         if conditions:
             self.model_name = f'cond_{self.model_name}'
-        if self.data_dir is None:
-            raise ValueError('.data_dir must be specified')
-        if self.datasets is None:
+        dir_project = self.require_dir_project()
+        if not self.datasets:
             raise ValueError('.datasets must be specified')
-        self.model_dir = Path(self.data_dir, 'models', self.model_name)
+        self.model_dir = Path(dir_project, 'models', self.model_name)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
         self.data_loader = DatasetLoader(
             datasets=self.datasets,
-            dir_datasets=self.data_dir,
+            dir_datasets={ds: self.dir_dataset(ds) for ds in self.datasets},
             sample_key=self.sample_key,
         )
         self.data_loader.load_datasets()
-        self.data_loader.set_train_val_split()
+        # Pass batch_size through: the split truncation and the generators must agree on it,
+        # or patches are dropped to align with 64 while batching happens at another size.
+        self.data_loader.set_train_val_split(batch_size=batch_size)
 
         self.model_config = {
             'n_latent_dim': n_latent_dim,
@@ -335,7 +446,13 @@ class Phenocoder:
             'input_shape': list(input_shape),
             'conv_layers': list(conv_layers),
             'dropout': dropout,
-            'dir_dataset': self.data_dir,
+            # Dataset *names*; resolved against dir_project at load time so a project
+            # directory stays relocatable. Only genuine out-of-tree overrides are stored
+            # as paths, in `dir_datasets`.
+            'datasets': list(self.datasets),
+            'dir_datasets': {
+                name: str(path) for name, path in self.dir_datasets.items()
+            },
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
@@ -348,6 +465,7 @@ class Phenocoder:
                 self.model_oh_enc,
             ) = self.data_loader.get_generators(
                 conditions=conditions,
+                batch_size=batch_size,
                 dim=input_shape[:2],
                 n_channels=input_shape[-1],
                 flip=flip,
@@ -363,6 +481,7 @@ class Phenocoder:
         else:
             self.data_generator_train, self.data_generator_val = (
                 self.data_loader.get_generators(
+                    batch_size=batch_size,
                     dim=input_shape[:2],
                     n_channels=input_shape[-1],
                     flip=flip,
@@ -404,6 +523,11 @@ class Phenocoder:
         Reconstructs the model architecture from saved configuration and loads
         the trained weights. Also loads the one-hot encoder for conditional models.
 
+        ``dir_project``, ``datasets`` and ``dir_datasets`` are restored from the config's
+        location and contents, so a loaded model can be used with ``encode`` directly. The
+        config lives at ``dir_project/models/<model_name>/config.yaml``, so the project root
+        is recovered from the path rather than stored, keeping the directory relocatable.
+
         Returns:
             None
 
@@ -419,6 +543,23 @@ class Phenocoder:
 
         with open(self.model_config, 'r') as file:
             self.model_config = yaml.load(file, Loader=yaml.FullLoader)
+
+        # dir_project/models/<model_name>/config.yaml -> dir_project
+        if self.dir_project is None:
+            self.dir_project = config_path.parent.parent.parent
+        # A config written before the dir_* rename carries `dataset_dirs`. Reading it with
+        # .get('dir_datasets') would silently ignore the overrides and resolve those datasets
+        # under dir_project instead, so say so rather than quietly looking in the wrong place.
+        if 'dataset_dirs' in self.model_config:
+            raise ValueError(
+                f'{config_path} uses the old "dataset_dirs" key; it is now "dir_datasets". '
+                'Rename it in the config, or regenerate the model.'
+            )
+        # Restore dataset bookkeeping; `encode` iterates these to find patches.csv/stats.csv.
+        if self.model_config.get('datasets'):
+            self.datasets = list(self.model_config['datasets'])
+        for name, path in (self.model_config.get('dir_datasets') or {}).items():
+            self.dir_datasets.setdefault(name, Path(path))
 
         if self.model_config['conditional']:
             self.model = CondCVAE(
@@ -506,7 +647,9 @@ class Phenocoder:
             ...     plot=True
             ... )
         """
-        self.dir_tensorboard = Path(self.data_dir, 'tensorboard_logs', self.model_name)
+        self.dir_tensorboard = Path(
+            self.require_dir_project(), 'tensorboard_logs', self.model_name
+        )
 
         if not self.dir_tensorboard.exists():
             self.dir_tensorboard.mkdir(parents=True, exist_ok=True)
@@ -622,8 +765,14 @@ class Phenocoder:
                 scale_per_sample=scale_per_sample,
             )
             self.patch_generator.init_patches()
+            if not self.datasets:
+                raise ValueError(
+                    '.datasets is empty -- encode() needs the training datasets to '
+                    'recover per-sample scaling and dataset labels. Set it explicitly, '
+                    'or load a model whose config.yaml records them.'
+                )
             patches_dfs = [
-                pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'patches.csv'))
+                pd.read_csv(Path(self.dir_dataset(ds), 'patches.csv'))
                 for ds in self.datasets
             ]
             patches_meta = pd.concat(patches_dfs, ignore_index=True)
@@ -635,7 +784,7 @@ class Phenocoder:
             ].map(sample_to_dataset)
             if scale:
                 stats_dfs = [
-                    pd.read_csv(Path(self.model_config['dir_dataset'], ds, 'stats.csv'))
+                    pd.read_csv(Path(self.dir_dataset(ds), 'stats.csv'))
                     for ds in self.datasets
                 ]
                 self.patch_generator.df_stats = pd.concat(stats_dfs, ignore_index=True)
@@ -772,6 +921,20 @@ class Phenocoder:
                 f'cluster_key "{cluster_key}" not found in adata.obs. '
                 f'Available columns: {list(adata.obs.columns)}'
             )
+
+        # Several statistics name their columns from `cluster_key`'s *categories* rather
+        # than from the labels a given sample happens to contain (see
+        # SpatialGraphAnalyzer.get_interactions / get_centrality / get_connectivity), which
+        # is what keeps the feature set identical across samples. AnnData subsetting keeps
+        # unused categories, so that holds -- but only if the column is Categorical.
+        # get_moran_cluster uses pd.get_dummies, which silently emits only-observed columns
+        # for an object/string column. Coerce once, here, so the invariant is guaranteed
+        # rather than assumed.
+        if not isinstance(adata.obs[cluster_key].dtype, pd.CategoricalDtype):
+            adata.obs[cluster_key] = pd.Categorical(adata.obs[cluster_key])
+        cluster_categories = [
+            str(c) for c in adata.obs[cluster_key].cat.categories.tolist()
+        ]
 
         if spatial_key not in adata.obsm.keys():
             raise ValueError(
@@ -999,6 +1162,16 @@ class Phenocoder:
                 var=pd.DataFrame(index=df_stats.columns),
             )
 
+        # Record how these statistics were produced. A matching feature *set* is not enough
+        # to make two runs comparable -- statistics at different radii carry identical
+        # column names -- so reference mapping validates this config too.
+        self.stats_config = {
+            'cluster_key': cluster_key,
+            'radii': tuple(radii),
+            'stats': list(stats) if stats is not None else None,
+            'cluster_categories': cluster_categories,
+        }
+
     def spatialgraph_embedding(
         self,
         n_dim: int,
@@ -1010,6 +1183,8 @@ class Phenocoder:
         n_neighbors: int = 15,
         umap: bool = True,
         obs_keys: str | list[str] | None = None,
+        save_transform: bool = False,
+        transform_path: str | Path | None = None,
     ) -> None:
         """
         Generate spatial graph embeddings from all samples.
@@ -1017,6 +1192,11 @@ class Phenocoder:
         Creates low-dimensional embeddings that capture spatial relationships
         between nuclei across all samples in the dataset. This can be used
         for sample-level comparisons and spatial pattern analysis.
+
+        This is the **fit** path: the scaler, PCA and UMAP are fitted on whatever samples
+        ``self.adata`` holds. Pass ``save_transform=True`` to persist them, then project new
+        samples into that frozen space with
+        :meth:`~phenocoder.Phenocoder.spatialgraph_map_query` instead of re-running this.
 
         Args:
             n_dim (int): Number of principal components to compute.
@@ -1038,6 +1218,13 @@ class Phenocoder:
                 can be colored by them. Each value is taken per sample via
                 ``groupby(sample_key).first()`` and must be constant within a sample.
                 Defaults to None.
+            save_transform (bool, optional): Persist the fitted scaler/PCA/UMAP so new
+                samples can later be projected into this exact space. Switches scaling and
+                PCA from scanpy to the equivalent sklearn estimators (see Note). Requires
+                ``spatialgraph_stats`` to have been run in this session, and is incompatible
+                with ``batch_correction``. Defaults to False.
+            transform_path (str | Path | None, optional): Where to write the transform.
+                Defaults to ``dir_project/reference/embedding_transform.joblib``.
 
         Returns:
             None
@@ -1046,6 +1233,15 @@ class Phenocoder:
             ValueError: If self.adata is None or not set.
             ValueError: If batch_correction=True but batch_key is None.
             ValueError: If batch_key is not found in adata.obs or sdata.tables.
+            ValueError: If save_transform=True together with batch_correction=True, or
+                without a preceding spatialgraph_stats() call.
+
+        Note:
+            ``save_transform=True`` changes the numbers slightly. Scaling switches from
+            ``sc.pp.scale`` (ddof=1) to ``StandardScaler`` (ddof=0), a factor of
+            ``sqrt(n/(n-1))`` per feature -- 2.6% at 20 samples. PCA *directions* are
+            unaffected, absolute coordinates are not, so embeddings fitted with and without
+            ``save_transform`` are not directly comparable.
 
         Note:
             Results are stored in self.adata with:
@@ -1067,6 +1263,29 @@ class Phenocoder:
             raise ValueError(
                 'self.adata is None. Run spatialgraph_stats() first to compute '
                 'spatial statistics before generating embeddings.'
+            )
+
+        if save_transform and batch_correction:
+            # bbknn.ridge_regression mutates .X before PCA and is inherently pooled -- there
+            # is no transform-only form, so a saved space could not be reproduced for a
+            # query. Leave the reference uncorrected; the batch effect then shows up as a
+            # shift in the projected coordinates, which is usually the quantity of interest.
+            raise ValueError(
+                'save_transform=True is incompatible with batch_correction=True: '
+                'bbknn.ridge_regression has no transform-only form, so the fitted space '
+                'could not be applied to a query.'
+            )
+        if save_transform and variable_features:
+            # sc.pp.highly_variable_genes sets a mask scanpy's PCA consumes; the sklearn
+            # path below would silently ignore it and fit on all features.
+            raise ValueError(
+                'save_transform=True does not support variable_features=True.'
+            )
+        if save_transform and self.stats_config is None:
+            raise ValueError(
+                'save_transform requires spatialgraph_stats() to have been run in this '
+                'session, so the radii/stats/cluster labels behind these features are '
+                'known and can be validated against at query time.'
             )
 
         # Carry per-sample metadata (e.g. condition groups) into adata.obs so the
@@ -1107,9 +1326,18 @@ class Phenocoder:
         # Store raw data
         self.adata.layers['raw'] = self.adata.X.copy()
 
-        # Scale data
+        # Scale data. When the fitted space is to be saved, use a StandardScaler so there is
+        # an object to persist -- sc.pp.scale writes in place and keeps nothing. NOTE the two
+        # are not numerically identical: scanpy uses ddof=1, sklearn ddof=0, a factor of
+        # sqrt(n/(n-1)) on every feature. PCA directions are unaffected; absolute coordinates
+        # are not. Only the save path takes the sklearn branch, so default output is unchanged.
+        scaler = None
         if scale:
-            sc.pp.scale(self.adata)
+            if save_transform:
+                scaler = StandardScaler()
+                self.adata.X = scaler.fit_transform(self.adata.X)
+            else:
+                sc.pp.scale(self.adata)
             self.adata.X[np.isnan(self.adata.X)] = 0
 
         # Handle batch correction metadata
@@ -1195,11 +1423,19 @@ class Phenocoder:
 
         # Compute PCA. ``mask_var`` replaces the deprecated ``use_highly_variable``
         # argument: "highly_variable" restricts PCA to HVGs, None uses all features.
-        sc.pp.pca(
-            self.adata,
-            n_comps=n_dim,
-            mask_var='highly_variable' if variable_features else None,
-        )
+        pca_model = None
+        if save_transform:
+            # sklearn's PCA reproduces sc.pp.pca to ~1e-6 on the same matrix, and unlike
+            # scanpy leaves behind an object that can project new data. Keep 'arpack' to
+            # match scanpy's solver.
+            pca_model = PCA(n_components=n_dim, svd_solver='arpack', random_state=0)
+            self.adata.obsm['X_pca'] = pca_model.fit_transform(self.adata.X)
+        else:
+            sc.pp.pca(
+                self.adata,
+                n_comps=n_dim,
+                mask_var='highly_variable' if variable_features else None,
+            )
 
         if batch_correction:
             bbknn.bbknn(
@@ -1208,5 +1444,127 @@ class Phenocoder:
         else:
             sc.pp.neighbors(self.adata, n_neighbors=n_neighbors, use_rep='X_pca')
 
+        umap_model = None
         if umap:
-            sc.tl.umap(self.adata, n_components=2, min_dist=0.1)
+            if save_transform:
+                # scanpy does not expose the fitted UMAP, so drive umap-learn directly.
+                # random_state is pinned: with it, transform() reproduces fit_transform on
+                # the reference points exactly, which is what makes the saved space stable.
+                umap_model = UMAP(
+                    n_components=2,
+                    min_dist=0.1,
+                    n_neighbors=n_neighbors,
+                    random_state=0,
+                )
+                self.adata.obsm['X_umap'] = umap_model.fit_transform(
+                    self.adata.obsm['X_pca']
+                )
+            else:
+                sc.tl.umap(self.adata, n_components=2, min_dist=0.1)
+
+        if save_transform:
+            path = save_reference_transform(
+                transform_path if transform_path is not None else self.dir_reference,
+                scaler=scaler,
+                pca=pca_model,
+                umap_model=umap_model,
+                var_names=self.adata.var_names.tolist(),
+                cluster_key=self.stats_config['cluster_key'],
+                cluster_categories=self.stats_config['cluster_categories'],
+                radii=self.stats_config['radii'],
+                stats_groups=self.stats_config['stats'],
+                scale=scale,
+            )
+            print(f'Saved embedding transform to {path}')
+
+    def spatialgraph_map_query(
+        self,
+        transform_path: str | Path | None = None,
+        umap: bool = True,
+        allow_extra: bool = True,
+        validate_config: bool = True,
+        clip: float | None = 10.0,
+    ) -> None:
+        """
+        Project this object's statistics into a saved reference embedding space.
+
+        Transform-only: the stored scaler, PCA and UMAP are applied as fitted, so the
+        reference space is unchanged by whatever the query contains. Use this instead of
+        :meth:`~phenocoder.Phenocoder.spatialgraph_embedding` when the axes must stay
+        fixed -- for example projecting experimental samples into a space built from a
+        simulation parameter sweep.
+
+        Run :meth:`~phenocoder.Phenocoder.spatialgraph_stats` first, with the same
+        ``cluster_key``, ``radii`` and ``stats`` used to build the reference.
+
+        Args:
+            transform_path (str | Path | None, optional): Transform to load. Defaults to
+                ``dir_project/reference/embedding_transform.joblib``.
+            umap (bool, optional): Also project into the reference UMAP, if one was saved.
+                Defaults to True.
+            allow_extra (bool, optional): Drop query-only features (ones the reference has
+                no PCA loading for, so they cannot be projected) with a warning. Pass False
+                to make them a hard error instead. Defaults to True.
+            validate_config (bool, optional): Check the query's ``cluster_key``/``radii``/
+                ``stats`` and cluster label set against the reference's. Defaults to True.
+            clip (float | None, optional): Clip scaled values to +/- this many standard
+                deviations before projecting, bounding the influence of features that barely
+                varied in the reference. Pass None to disable. Defaults to 10.0.
+
+        Returns:
+            None: Coordinates are written to ``self.adata.obsm['X_pca']`` and, when
+                available, ``self.adata.obsm['X_umap']``. The unscaled statistics are kept
+                in ``.layers['raw']``.
+
+        Raises:
+            ValueError: If ``self.adata`` is unset, if the query's features cannot be
+                aligned to the reference's, or if the stats configuration differs.
+            FileNotFoundError: If no transform exists at ``transform_path``.
+
+        Note:
+            Reference points re-projected through the saved UMAP land exactly where they did
+            at fit time, but query points are placed by UMAP's approximate ``transform`` and
+            are best treated as a visualization. Use the PCA coordinates for quantitative
+            comparison.
+
+        Example:
+            >>> query.spatialgraph_stats(cluster_key='leiden', radii=(25, 50))
+            >>> query.spatialgraph_map_query('ref/reference/embedding_transform.joblib')
+            >>> query.adata.obsm['X_pca']  # in reference coordinates
+        """
+        if self.adata is None:
+            raise ValueError(
+                'self.adata is None. Run spatialgraph_stats() first to compute the '
+                'statistics to project.'
+            )
+
+        payload = load_transform(
+            transform_path if transform_path is not None else self.dir_reference
+        )
+
+        if validate_config:
+            if self.stats_config is None:
+                warnings.warn(
+                    'No stats_config on this object (spatialgraph_stats was not run in '
+                    'this session), so the query configuration cannot be checked against '
+                    'the reference. Feature alignment is still enforced.',
+                    stacklevel=2,
+                )
+            else:
+                check_stats_config(
+                    payload,
+                    cluster_key=self.stats_config['cluster_key'],
+                    radii=self.stats_config['radii'],
+                    stats_groups=self.stats_config['stats'],
+                    cluster_categories=self.stats_config['cluster_categories'],
+                )
+
+        df = self.adata.to_df()
+        X_pca, X_umap = apply_transform(
+            df, payload, allow_extra=allow_extra, umap=umap, clip=clip
+        )
+
+        self.adata.layers['raw'] = self.adata.X.copy()
+        self.adata.obsm['X_pca'] = X_pca
+        if X_umap is not None:
+            self.adata.obsm['X_umap'] = X_umap

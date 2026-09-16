@@ -5,9 +5,9 @@ from tests.conftest import example_3d
 
 def test_train():
     pheno = example_3d()
+    pheno.dir_project = 'tests/data/tmp'
     pheno.generate_dataset(
         dataset='test_dataset',
-        dir_dataset='tests/data/tmp',
         spatial_key_index='spatial_index',
     )
     pheno.initialize_model(
