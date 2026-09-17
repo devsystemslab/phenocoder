@@ -2,7 +2,7 @@
 name = "phenocoder"
 version = "0.1.0"
 description = "A machine-learning framework that combines conditional variational autoencoders with spatial graph analysis to learn unsupervised phenotypic embeddings of complex tissue architectures from microscopy images."
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.11, <3.13"
 dependencies = [
     # Linux: full CUDA stack
     "tensorflow[and-cuda]>=2.19.0; sys_platform == 'linux'",
@@ -31,6 +31,7 @@ dev = [
     "ipdb>=0.13.13",
     "ipython>=8.37.0",
     "pytest>=8.4.2",
+    "pytest-cov>=7.0",
     "ruff>=0.13.2",
 ]
 docs = [

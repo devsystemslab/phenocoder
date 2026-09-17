@@ -16,3 +16,6 @@ phenocoder.egg-info/
 sdata/
 *.npy
 tmp/
+.coverage
+coverage.json
+htmlcov/

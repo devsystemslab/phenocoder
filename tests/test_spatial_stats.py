@@ -1,5 +1,9 @@
+import anndata as ad
+import numpy as np
+import pandas as pd
 import pytest
 import scanpy as sc
+from scipy.spatial import QhullError
 
 from phenocoder.spatial import SpatialGraphAnalyzer
 from tests.conftest import example_3d
@@ -240,6 +244,119 @@ def test_spatial_stats_invalid_stat():
             index='5',
             stats=['not_a_real_stat'],
         )
+
+
+# --- get_chull ------------------------------------------------------------------------
+#
+# Whole-sample convex hull. Note this is *not* the method the run() pipeline uses -- that
+# is get_chulls_connected_components -- so nothing else in the suite exercises it, and its
+# three degenerate-input guards are the fragile part.
+
+ZERO_CHULL = {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0}
+
+
+def _chull_analyzer(coords, index='s'):
+    """Analyzer over bare coordinates, in the obs columns get_chull reads."""
+    coords = np.asarray(coords, dtype=float)
+    obs = pd.DataFrame(
+        {
+            'z': coords[:, 0],
+            'centroid-0': coords[:, 1],
+            'centroid-1': coords[:, 2],
+        },
+        index=[str(i) for i in range(len(coords))],
+    )
+    obs['leiden'] = pd.Categorical(['0'] * len(coords))
+    adata = ad.AnnData(X=np.zeros((len(coords), 1), dtype=float), obs=obs)
+    adata.obsm['spatial'] = coords
+    return SpatialGraphAnalyzer(
+        adata,
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(50,),
+        index=index,
+    )
+
+
+def _assert_zero_hull(df, index='s'):
+    assert list(df.index) == [index]
+    for col, value in ZERO_CHULL.items():
+        assert df[col].iloc[0] == value
+
+
+def test_get_chull_computes_hull_for_dense_cloud():
+    """A dense 3D cloud yields a hull bounded by its box, with consistent density."""
+    rng = np.random.default_rng(0)
+    coords = rng.uniform(0, 10, size=(80, 3))
+    df = _chull_analyzer(coords).get_chull(radius=100, degree_threshold=5)
+
+    assert list(df.index) == ['s']
+    volume = df['volume_chull'].iloc[0]
+    area = df['area_chull'].iloc[0]
+    assert 0 < volume < 10**3  # cannot exceed the bounding cube
+    assert area > 0
+    # density is points-per-volume over the points that survived the degree filter
+    assert df['density_chull'].iloc[0] == pytest.approx(80 / volume)
+
+
+def test_get_chull_too_few_points():
+    """Fewer than 4 points cannot span a 3D hull, so the zero frame is returned."""
+    df = _chull_analyzer([[0, 0, 0], [1, 0, 0], [0, 1, 0]]).get_chull()
+    _assert_zero_hull(df)
+
+
+def test_get_chull_degree_filter_empties_the_cloud():
+    """Points further apart than the radius are all filtered out before the hull.
+
+    The degree filter runs after the <4 check, so this is a separate guard.
+    """
+    coords = [[i * 1000.0, 0.0, 0.0] for i in range(6)]
+    df = _chull_analyzer(coords).get_chull(radius=10, degree_threshold=5)
+    _assert_zero_hull(df)
+
+
+def test_get_chull_axis_aligned_planar_cloud():
+    """A cloud flat along one axis is degenerate in 3D and returns the zero frame."""
+    rng = np.random.default_rng(0)
+    n = 40
+    coords = np.column_stack(
+        [np.full(n, 5.0), rng.uniform(0, 10, n), rng.uniform(0, 10, n)]
+    )
+    df = _chull_analyzer(coords).get_chull(radius=100, degree_threshold=5)
+    _assert_zero_hull(df)
+
+
+def test_get_chull_uses_its_index():
+    """The sample identifier is carried onto the returned row."""
+    rng = np.random.default_rng(0)
+    coords = rng.uniform(0, 10, size=(40, 3))
+    df = _chull_analyzer(coords, index='well_A06').get_chull(
+        radius=100, degree_threshold=5
+    )
+    assert list(df.index) == ['well_A06']
+
+
+def test_get_chull_tilted_planar_cloud_raises():
+    """Coplanar but not axis-aligned: the degeneracy guard misses it and Qhull raises.
+
+    The guard only rejects a *constant* z/centroid-0/centroid-1 column, so a cloud lying
+    on a tilted plane (no column constant) reaches ConvexHull, which cannot build an
+    initial simplex from coplanar points. get_chulls_connected_components catches
+    QhullError for exactly this case; get_chull does not.
+
+    Documented rather than fixed: coordinates landing exactly on a plane do not occur in
+    experimental or simulation data, and get_chull is not on the run() path. This test
+    pins the current behaviour so the difference between the two methods is visible and
+    the case is not rediscovered from scratch. Adding the guard should turn this into the
+    zero frame -- update the test then, it is not a tripwire.
+    """
+    rng = np.random.default_rng(1)
+    n = 40
+    u = rng.uniform(0, 10, n)
+    v = rng.uniform(0, 10, n)
+    coords = np.column_stack([u + v, u, v])  # z = x + y
+    with pytest.raises(QhullError):
+        _chull_analyzer(coords).get_chull(radius=100, degree_threshold=5)
 
 
 if __name__ == '__main__':
