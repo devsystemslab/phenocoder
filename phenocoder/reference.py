@@ -38,26 +38,6 @@ import pandas as pd
 TRANSFORM_FILENAME = 'embedding_transform.joblib'
 
 
-def _stat_group(feature: str) -> str | None:
-    """
-    Recover the stat group from a feature name.
-
-    Args:
-        feature (str): Column name as produced by ``SpatialGraphAnalyzer.to_df``, of the
-            form ``radius:{radius}_stat:{group}_{col}`` -- or ``stat:{group}_{col}`` for
-            radius-independent groups such as ``counts``.
-
-    Returns:
-        str | None: The stat group, or None if the name does not carry one.
-    """
-    marker = 'stat:'
-    start = feature.find(marker)
-    if start == -1:
-        return None
-    rest = feature[start + len(marker) :]
-    return rest.split('_', 1)[0] or None
-
-
 def align_features(
     df: pd.DataFrame,
     var_names: list[str],
