@@ -36,8 +36,8 @@ full workflow on top of it:
 - **Flexible patch extraction**: configurable patch size, 2D or per-z-slice 3D sampling, and
   global or per-sample intensity normalization.
 - **Spatial message passing**: aggregate latents over a physical-distance neighborhood graph.
-- **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity and
-  convex-hull statistics at sample or subunit resolution.
+- **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity,
+  convex-hull statistics and cluster composition at sample or subunit resolution.
 - **Reference mapping**: save a fitted sample-level embedding (e.g. from simulation) and
   project new samples into it, leaving the reference axes fixed.
 - **Single `dir_project`**: datasets, models, tensorboard logs and reference transforms all
@@ -216,8 +216,8 @@ pheno.spatialgraph_stats(
 ```
 
 By default every stat group is computed. Pass `stats=[...]` to select a subset — valid groups
-are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters` and
-`chull`:
+are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters`,
+`chull` and `counts`:
 
 ```python
 pheno.spatialgraph_stats(

@@ -44,12 +44,13 @@ def _stat_group(feature: str) -> str | None:
 
     Args:
         feature (str): Column name as produced by ``SpatialGraphAnalyzer.to_df``, of the
-            form ``radius:{radius}_stat:{group}_{col}``.
+            form ``radius:{radius}_stat:{group}_{col}`` -- or ``stat:{group}_{col}`` for
+            radius-independent groups such as ``counts``.
 
     Returns:
         str | None: The stat group, or None if the name does not carry one.
     """
-    marker = '_stat:'
+    marker = 'stat:'
     start = feature.find(marker)
     if start == -1:
         return None

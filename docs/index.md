@@ -37,8 +37,8 @@ class drives the full workflow on top of it.
 - **Flexible patch extraction**: configurable patch size, 2D or per-z-slice 3D sampling, and
   global or per-sample intensity normalization.
 - **Spatial message passing**: aggregate latents over a physical-distance neighborhood graph.
-- **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity and
-  convex-hull statistics at sample or subunit resolution.
+- **Spatial graph analysis**: interaction matrices, Moran's I, centrality, connectivity,
+  convex-hull statistics and cluster composition at sample or subunit resolution.
 - **Beta-VAE support**: tune the KL weight (`beta`) for more disentangled representations.
 - Built on Keras 3 with the TensorFlow backend.
 

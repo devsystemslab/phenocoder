@@ -356,8 +356,8 @@ pheno.spatialgraph_stats(
 ```
 
 By default every stat group is computed. Pass `stats=[...]` to select a subset — the valid
-groups are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters` and
-`chull`:
+groups are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters`,
+`chull` and `counts`:
 
 ```python
 pheno.spatialgraph_stats(

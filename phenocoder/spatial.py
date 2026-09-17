@@ -36,7 +36,9 @@ class SpatialGraphAnalyzer:
         stats (set[str]): Stat groups to compute (subset of VALID_STATS); defaults to all.
         chull_min_nds (int): Minimum nodes per connected component for convex-hull stats.
         chull_min_degree (int): Minimum node degree before extracting convex-hull components.
-        results (dict): Computed statistics, populated after run() is called.
+        results (dict): Per-radius statistics, populated after run() is called.
+        results_global (pd.DataFrame | None): Statistics that do not depend on a radius
+            (cluster composition), populated after run() is called.
 
     Example:
         >>> analyzer = SpatialGraphAnalyzer(
@@ -58,6 +60,7 @@ class SpatialGraphAnalyzer:
         'moran_features',
         'moran_clusters',
         'chull',
+        'counts',
     )
 
     def __init__(
@@ -88,6 +91,9 @@ class SpatialGraphAnalyzer:
                     f'Valid options: {list(self.VALID_STATS)}'
                 )
             self.stats = set(stats)
+        # Populated by run(): per-radius results, and results for radius-independent groups.
+        self.results: dict = {}
+        self.results_global: pd.DataFrame | None = None
 
     def get_chull(
         self,
@@ -444,24 +450,30 @@ class SpatialGraphAnalyzer:
 
     def get_counts(self) -> pd.DataFrame:
         """
-        Calculate cell counts per cluster.
+        Calculate cell counts and composition per cluster.
 
-        Computes the number of cells in each cluster and the total number of cells.
+        Counts are reported both absolutely and as a fraction of the sample/subunit, since
+        the other stat groups describe spatial *arrangement* and say little about how much
+        of each cluster is present.
+
+        ``observed=False`` keeps a column for every category, including ones absent here, so
+        the feature set stays aligned with the cluster label set rather than with whichever
+        labels this particular sample happens to contain.
 
         Returns:
-            pd.DataFrame: DataFrame with one row indexed by self.index containing:
-                - 'cluster': Cluster label
-                - 'count': Number of cells in the cluster
-                - 'total': Total number of cells across all clusters
+            pd.DataFrame: One row indexed by self.index, with columns
+                ``count_{cluster}``, ``frac_{cluster}`` and ``count_total``.
         """
-        df_counts = (
-            self.adata.obs.groupby(self.cluster_key)
-            .size()
-            .reset_index(index=[self.index])
+        counts = self.adata.obs.groupby(self.cluster_key, observed=False).size()
+        total = int(self.adata.obs.shape[0])
+
+        df_counts = pd.DataFrame(
+            {f'count_{cluster}': [int(n)] for cluster, n in counts.items()},
+            index=[self.index],
         )
-        df_counts.columns = ['cluster', 'count']
-        df_counts['total'] = self.adata.obs.shape[0]
-        df_counts.index = [self.index]
+        for cluster, n in counts.items():
+            df_counts[f'frac_{cluster}'] = (n / total) if total else 0.0
+        df_counts['count_total'] = total
 
         return df_counts
 
@@ -486,9 +498,9 @@ class SpatialGraphAnalyzer:
 
         assert len(self.adata.obs[self.cluster_key].unique()) > 1
 
-        # The neighbor graph (spatial_connectivities) is needed by every stat group
-        # except chull; skip building it if only chull was requested.
-        if self.stats - {'chull'}:
+        # The neighbor graph (spatial_connectivities) is needed by every stat group except
+        # chull and counts; skip building it if only those were requested.
+        if self.stats - {'chull', 'counts'}:
             with quiet_spatialdata_logging():
                 sq.gr.spatial_neighbors_radius(
                     self.adata,
@@ -544,6 +556,9 @@ class SpatialGraphAnalyzer:
         prefixed with ``radius:{radius}_stat:{group}_`` so every statistic is
         traceable to the radius and stat group it came from.
 
+        The ``counts`` group is radius-independent and is emitted once, prefixed only with
+        ``stat:counts_``.
+
         Returns:
             pd.DataFrame: One row of spatial statistics for this sample/subunit.
         """
@@ -558,6 +573,15 @@ class SpatialGraphAnalyzer:
                     for col in self.results[radius][result].columns
                 ]
                 df.append(self.results[radius][result].reset_index(drop=True))
+
+        # Cluster composition does not depend on a neighborhood radius, so it is computed
+        # once and carries no radius prefix. Emitting it per radius would repeat identical
+        # values and give composition proportionally more weight in a downstream PCA.
+        if self.results_global is not None and not self.results_global.empty:
+            global_df = self.results_global.copy()
+            global_df.columns = [f'stat:counts_{col}' for col in global_df.columns]
+            df.append(global_df.reset_index(drop=True))
+
         df = pd.concat(df, axis=1)
         df.index = [self.index]
         return df
@@ -567,7 +591,8 @@ class SpatialGraphAnalyzer:
         Compute all selected spatial statistics across every configured radius.
 
         Populates ``self.results`` (a dict keyed by radius) by calling
-        :meth:`get_spatial_stats` for each radius in ``self.radii``. Call
+        :meth:`get_spatial_stats` for each radius in ``self.radii``, plus
+        ``self.results_global`` for stat groups that do not depend on a radius. Call
         :meth:`to_df` afterwards to collect the results into a DataFrame.
 
         Returns:
@@ -576,6 +601,8 @@ class SpatialGraphAnalyzer:
         self.results = dict()
         for radius in self.radii:
             self.results[radius] = self.get_spatial_stats(radius)
+        # Radius-independent groups are computed once rather than per radius.
+        self.results_global = self.get_counts() if 'counts' in self.stats else None
 
 
 def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:

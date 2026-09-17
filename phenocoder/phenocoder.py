@@ -852,7 +852,9 @@ class Phenocoder:
                 uses self.table_key. Defaults to None.
             stats (list[str] | None, optional): Which stat groups to compute. Valid options:
                 'interactions', 'centrality', 'connectivity', 'moran_features',
-                'moran_clusters', 'chull'. If None, all groups are computed. Defaults to None.
+                'moran_clusters', 'chull', 'counts'. If None, all groups are computed.
+                Defaults to None. Note 'counts' (cluster composition) is radius-independent,
+                so its columns carry no ``radius:`` prefix.
             chull_min_nds (int, optional): Minimum number of nodes per connected component for
                 convex-hull statistics. Only used if 'chull' is in stats. Defaults to 10.
             chull_min_degree (int, optional): Minimum node degree before extracting convex-hull
