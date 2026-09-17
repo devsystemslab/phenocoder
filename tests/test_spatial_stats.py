@@ -336,24 +336,27 @@ def test_get_chull_uses_its_index():
     assert list(df.index) == ['well_A06']
 
 
-@pytest.mark.xfail(
-    raises=QhullError,
-    strict=True,
-    reason=(
-        'get_chull only guards axis-aligned degeneracy (a constant z/centroid-0/'
-        'centroid-1 column), so a cloud coplanar on a tilted plane reaches ConvexHull '
-        'and raises. get_chulls_connected_components catches QhullError for exactly '
-        'this case; get_chull does not.'
-    ),
-)
-def test_get_chull_tilted_planar_cloud():
-    """Coplanar but not axis-aligned: no column is constant, so the guard misses it."""
+def test_get_chull_tilted_planar_cloud_raises():
+    """Coplanar but not axis-aligned: the degeneracy guard misses it and Qhull raises.
+
+    The guard only rejects a *constant* z/centroid-0/centroid-1 column, so a cloud lying
+    on a tilted plane (no column constant) reaches ConvexHull, which cannot build an
+    initial simplex from coplanar points. get_chulls_connected_components catches
+    QhullError for exactly this case; get_chull does not.
+
+    Documented rather than fixed: coordinates landing exactly on a plane do not occur in
+    experimental or simulation data, and get_chull is not on the run() path. This test
+    pins the current behaviour so the difference between the two methods is visible and
+    the case is not rediscovered from scratch. Adding the guard should turn this into the
+    zero frame -- update the test then, it is not a tripwire.
+    """
     rng = np.random.default_rng(1)
     n = 40
     u = rng.uniform(0, 10, n)
     v = rng.uniform(0, 10, n)
     coords = np.column_stack([u + v, u, v])  # z = x + y
-    _chull_analyzer(coords).get_chull(radius=100, degree_threshold=5)
+    with pytest.raises(QhullError):
+        _chull_analyzer(coords).get_chull(radius=100, degree_threshold=5)
 
 
 if __name__ == '__main__':
