@@ -5,7 +5,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import squidpy as sq
-from scipy.sparse import csr_array
+from scipy.sparse import csr_array, diags_array, issparse
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.neighbors import radius_neighbors_graph
 
@@ -610,9 +610,10 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     Smooth latent representations over a spatial neighborhood graph.
 
     Builds a radius-based spatial connectivity graph in physical space, adds self-loops,
-    and applies a degree-normalized adjacency matrix ``A' = (A + I) · D⁻¹`` to ``adata.X``.
-    Each object's smoothed latent is the (degree-normalized) average of itself and its
-    spatial neighbors. The result is stored in ``adata.layers['spatial_message_passing']``.
+    and applies a row-normalized adjacency matrix ``A' = D⁻¹ · (A + I)`` to ``adata.X``.
+    Each object's smoothed latent is the unweighted mean of itself and its spatial
+    neighbors, so smoothed values stay within the range of the inputs. The result is
+    stored in ``adata.layers['spatial_message_passing']``.
 
     Args:
         adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
@@ -632,9 +633,22 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     A = A + csr_array(np.diag(np.ones(A.shape[0])))
     # weight A with inverse degree matrix
     D = np.array(A.sum(axis=1)).flatten()
-    D_inv = np.power(D, -1)
+    D_inv = np.power(D, -1.0)
     D_inv[np.isinf(D_inv)] = 0
-    D_inv = np.diag(D_inv)
-    A = A.dot(D_inv)
-    adata.layers['spatial_message_passing'] = np.dot(A, adata.X)
+    # Row-normalize: row i of D_inv @ A scales node i's whole neighborhood by 1/d_i, so
+    # each smoothed latent is the mean over {i} U N(i). Multiplying the other way round
+    # (A @ D_inv) scales *columns* by 1/d_j, which weights each neighbor by its own degree
+    # and does not average -- hub values then land outside the input range.
+    #
+    # D_inv must stay a 1-D vector here. np.diag(D_inv).dot(A) dispatches to NumPy, which
+    # does not understand a sparse operand and silently returns an object-dtype array of
+    # sparse matrices instead of numbers; diags_array keeps SciPy in charge.
+    A = diags_array(D_inv) @ A
+    # A stays sparse, so A @ X is sparse too; layers are expected to be dense arrays
+    # matching .X, and np.asarray on a sparse matrix yields a 0-d object array rather
+    # than densifying it.
+    smoothed = A @ adata.X
+    adata.layers['spatial_message_passing'] = (
+        smoothed.toarray() if issparse(smoothed) else np.asarray(smoothed)
+    )
     return adata
