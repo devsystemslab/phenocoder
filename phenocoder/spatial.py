@@ -208,7 +208,15 @@ class SpatialGraphAnalyzer:
             ).tolist()
             df_interaction.columns = cluster_names
             df_interaction.index = cluster_names
-            df_interaction = df_interaction.stack().reset_index()
+            # squidpy returns the full category x category matrix but leaves an all-NaN
+            # row/column for a category with no cells here. A plain .stack() drops those
+            # entries, which silently shrank the feature set: with A-D declared but only
+            # A and B present, the C-D and D-C pairs disappeared entirely. Keep them and
+            # fill 0 -- an interaction count that is absent means these two clusters never
+            # co-occur in this sample.
+            df_interaction = (
+                df_interaction.stack(future_stack=True).fillna(0.0).reset_index()
+            )
             df_interaction.columns = ['from', 'to', 'count']
             if i:
                 df_interaction.index = (
@@ -295,6 +303,10 @@ class SpatialGraphAnalyzer:
             show_progress_bar=False,
         )
         df_moran = pd.DataFrame(adata_cl.uns['moranI'])
+        # spatial_autocorr sorts its result by Moran's I, descending, so the row order
+        # follows the data rather than the label set and varies between samples.
+        # Reindex onto the one-hot column order to make it deterministic.
+        df_moran = df_moran.reindex(list(adata_cl.var_names))
         df_moran = df_moran[['I']].T
         df_moran.index = [self.index]
         # add moranI prefix to all columns

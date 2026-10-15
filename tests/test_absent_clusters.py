@@ -8,16 +8,12 @@ from phenocoder.spatial import SpatialGraphAnalyzer
 # Every cluster-aware stat group should key its features off the *declared* label set, so
 # that two samples sharing a cluster_key produce the same feature vector even when one of
 # them happens to contain no cells of some cluster.
-#
-# 'interactions' and 'moran_clusters' are left out deliberately -- they have their own,
-# separate defects which this parametrization surfaced and which are not fixed here:
-#   - interactions drops the pair columns between two absent clusters (32 cols with all of
-#     A-D present, 24 with only A and B), so its feature set is not stable either.
-#   - moran_clusters emits the right column *set* but in an unstable *order*: squidpy's
-#     spatial_autocorr sorts its result by Moran's I, so the order follows the data rather
-#     than the label set.
-# Both would need fixing before they can join this list.
-CLUSTER_AWARE_GROUPS = ['centrality', 'connectivity']
+CLUSTER_AWARE_GROUPS = [
+    'interactions',
+    'centrality',
+    'connectivity',
+    'moran_clusters',
+]
 
 
 def _adata(present, categories, n_per=20, spread=40.0, seed=0):
@@ -80,6 +76,49 @@ def test_feature_set_follows_the_label_set(group):
     some_absent = _features(_adata(['A', 'B'], categories), stats=[group])
 
     assert list(all_present.columns) == list(some_absent.columns)
+
+
+def test_interactions_keeps_pairs_between_two_absent_clusters():
+    """The pair columns for two mutually-absent clusters survive.
+
+    squidpy returns the full category x category matrix with an all-NaN row/column per
+    empty category, and a plain .stack() dropped those entries. With one absent category
+    the surviving mixed pairs (A_C, B_C) hid the problem; it only shows with two, where
+    C_D and D_C vanished too.
+    """
+    categories = ['A', 'B', 'C', 'D']
+    row = _features(_adata(['A', 'B'], categories), stats=['interactions']).iloc[0]
+
+    # all 4 variants: raw and normalized, in both directions
+    pairs = [name for name in row.index if '_C_D' in name or '_D_C' in name]
+    assert len(pairs) == 4, f'expected 4 C/D pair columns, got {pairs}'
+    assert all(row[name] == 0.0 for name in pairs)
+    # and the full matrix is there: 2 normalizations x 4 x 4 pairs
+    assert len(row) == 32
+
+
+def test_moran_cluster_column_order_is_deterministic():
+    """Moran's I columns follow the label set, not the computed values.
+
+    squidpy's spatial_autocorr sorts its result by I descending, so without a reindex the
+    column order varied between samples of one run (e.g. B,C,A,D for one and D,A,B,C for
+    another). Nothing downstream was corrupted -- concat and align_features both join by
+    name -- but the order carried no meaning and silently tracked the data.
+    """
+    categories = ['A', 'B', 'C', 'D']
+    orders = [
+        [
+            column.split('moranI_')[-1]
+            for column in _features(
+                _adata(categories, categories, seed=seed),
+                stats=['moran_clusters'],
+                index=f's{seed}',
+            ).columns
+        ]
+        for seed in range(4)
+    ]
+
+    assert all(order == categories for order in orders)
 
 
 def test_absent_cluster_scores_zero_for_centrality():
