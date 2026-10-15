@@ -12,6 +12,16 @@ from sklearn.neighbors import radius_neighbors_graph
 from phenocoder.utils import quiet_spatialdata_logging
 
 
+class EmptyGraphError(ValueError):
+    """Raised when a neighbor graph has no edges, so there is nothing spatial to measure.
+
+    Not a bug but an expected outcome for a sample whose cells are all further apart than
+    the requested radius -- most often a unit mismatch between ``radii`` and the
+    coordinates (e.g. a radius in mm against micron coordinates). Callers treat it as a
+    reason to skip the sample rather than as a failure.
+    """
+
+
 class SpatialGraphAnalyzer:
     """
     Analyzer for computing spatial graph statistics on spatial omics data.
@@ -251,9 +261,16 @@ class SpatialGraphAnalyzer:
         adata = self.adata.copy()
         # .sum() on the sparse matrix is O(nnz) and gives the same number as
         # np.sum(.toarray()), which densified an n x n matrix just to test emptiness.
+        #
+        # run() rejects an edgeless graph up front (EmptyGraphError in get_spatial_stats),
+        # so this only fires for a caller invoking the method directly on one. Columns must
+        # still match the normal path's, or the caller gets a differently-shaped row.
         if adata.obsp.get('spatial_connectivities').sum() == 0:
-            df_moran = pd.DataFrame(0, index=[self.index], columns=adata.var_names)
-            return df_moran
+            return pd.DataFrame(
+                0,
+                index=[self.index],
+                columns=['moranI_' + str(name) for name in adata.var_names],
+            )
         sq.gr.spatial_autocorr(
             adata,
             mode='moran',
@@ -288,10 +305,18 @@ class SpatialGraphAnalyzer:
         adata_cl = ad.AnnData(
             df, obs=self.adata.obs, obsm=self.adata.obsm, obsp=self.adata.obsp
         )
-        # O(nnz) emptiness test; see get_moran.
+        # O(nnz) emptiness test; see get_moran. As there, run() rejects an edgeless graph
+        # before reaching this, so it only fires on a direct call.
+        #
+        # The columns are the one-hot cluster names, not self.adata.var_names -- those are
+        # the *feature* names, which gave this branch both the wrong names and the wrong
+        # column count (n_vars instead of n_categories).
         if self.adata.obsp.get('spatial_connectivities').sum() == 0:
-            df_moran = pd.DataFrame(0, index=[self.index], columns=self.adata.var_names)
-            return df_moran
+            return pd.DataFrame(
+                0,
+                index=[self.index],
+                columns=['moranI_' + str(name) for name in adata_cl.var_names],
+            )
         sq.gr.spatial_autocorr(
             adata_cl,
             mode='moran',
@@ -464,6 +489,12 @@ class SpatialGraphAnalyzer:
 
         Returns:
             dict: Mapping of stat-group name to its result DataFrame.
+
+        Raises:
+            ValueError: If ``cluster_key`` is None.
+            EmptyGraphError: If no cell lies within ``radius`` of another, so the neighbor
+                graph has no edges. Not raised when only radius-independent groups
+                (``chull``, ``counts``) were requested, since those never build the graph.
         """
         if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
@@ -478,6 +509,17 @@ class SpatialGraphAnalyzer:
                     self.adata,
                     radius=radius,
                     spatial_key=self.spatial_key,
+                )
+            # A graph with no edges has no spatial structure to describe: every
+            # graph-derived statistic collapses to 0 (or, for Moran's I, to undefined),
+            # leaving a row that looks like a measurement but only carries cluster
+            # composition -- which is radius-independent anyway. Refuse it here rather
+            # than emit that row. O(nnz) emptiness test; see get_moran.
+            if self.adata.obsp['spatial_connectivities'].sum() == 0:
+                raise EmptyGraphError(
+                    f'No cell is within radius {radius} of another, so the neighbor '
+                    f'graph has no edges and no spatial statistic is defined. Check that '
+                    f'radii matches the units of obsm["{self.spatial_key}"].'
                 )
         clusters = self.adata.obs[self.cluster_key].unique().tolist()
 
