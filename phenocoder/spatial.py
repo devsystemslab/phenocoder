@@ -561,17 +561,23 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     stored in ``adata.layers['spatial_message_passing']``.
 
     Args:
-        adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
-            (falls back to the 'x', 'y', 'z' obs columns if 'spatial' is missing).
+        adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates
+            in ``.obsm['spatial']``.
         radius (int): Radius (in spatial units) used to connect neighboring objects.
 
     Returns:
         ad.AnnData: The same object, with the smoothed latents added as
             ``.layers['spatial_message_passing']``.
+
+    Raises:
+        ValueError: If ``.obsm['spatial']`` is missing.
     """
     # calculate knn graph in physical space
-    if adata.obsm['spatial'] is None:
-        adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
+    if 'spatial' not in adata.obsm:
+        raise ValueError(
+            "'spatial' not found in adata.obsm, so there are no coordinates to build "
+            f'the neighborhood graph from. Available keys: {list(adata.obsm.keys())}'
+        )
     with quiet_spatialdata_logging():
         sq.gr.spatial_neighbors_radius(adata, radius=radius, spatial_key='spatial')
     A = adata.obsp['spatial_connectivities'].copy()

@@ -85,6 +85,29 @@ def test_message_passing_isolated_node_keeps_its_own_value():
     assert smoothed == pytest.approx([1.0, 2.0, 3.0])
 
 
+def test_message_passing_requires_spatial_coordinates():
+    """Missing coordinates raise a ValueError naming the keys that are present.
+
+    This used to be guarded by ``if adata.obsm['spatial'] is None``, which could never be
+    true: subscripting a missing obsm key raises KeyError, so the guard -- and the x/y/z
+    obs-column fallback behind it -- was unreachable.
+    """
+    adata = ad.AnnData(np.ones((4, 2)))
+    adata.obsm['spatial_2d'] = np.ones((4, 2))
+
+    with pytest.raises(ValueError, match="'spatial' not found in adata.obsm"):
+        spatial_message_passing(adata, radius=10)
+
+
+def test_message_passing_error_lists_available_obsm_keys():
+    """The message points at what is there, so a wrong key is easy to spot."""
+    adata = ad.AnnData(np.ones((4, 2)))
+    adata.obsm['spatial_index'] = np.ones((4, 3))
+
+    with pytest.raises(ValueError, match='spatial_index'):
+        spatial_message_passing(adata, radius=10)
+
+
 def test_message_passing_handles_multiple_latent_dimensions():
     """Smoothing acts per latent dimension, independently."""
     X = np.array([[0.0, 10.0], [1.0, 20.0], [1.0, 20.0], [1.0, 20.0], [1.0, 20.0]])
