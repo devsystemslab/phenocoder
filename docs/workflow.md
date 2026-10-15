@@ -232,6 +232,14 @@ pheno.spatialgraph_stats(
 For large or 3D samples it can partition each sample into spatial subunits and compute
 statistics per subunit — see [Subunit-level statistics](#subunit-level-statistics) below.
 
+```{note}
+A sample (or subunit) is skipped, with a warning, when it has no cells, when it has one
+cluster or fewer, or when no cell lies within any requested radius of another. The last case
+leaves nothing spatial to measure — every graph-derived statistic would be 0 — and usually
+means `radii` is expressed in different units than the coordinates in `.obsm[spatial_key]`.
+If every sample is skipped this way, the warnings name the radius involved.
+```
+
 ## 6. Spatial graph embedding
 
 {meth}`~phenocoder.Phenocoder.spatialgraph_embedding` embeds the per-sample (or per-subunit)
@@ -275,8 +283,11 @@ Things worth knowing:
   categories, which in practice means transferring the reference labels onto the query rather
   than clustering it independently. This is checked, along with `radii` and `stats`, and a
   mismatch raises.
-- **Per-sample feature sets legitimately differ.** A sample that contains no cells of some
-  cluster emits no columns for it; those are zero-filled. Query-only features cannot be
+- **Feature sets follow the label set, not the sample.** Every cluster-aware stat group
+  emits a column for each declared `cluster_key` category, including ones with no cells in
+  a given sample, which score 0 there. Feature sets can still differ between separate
+  `spatialgraph_stats` calls (a convex-hull component count, for instance, depends on the
+  data); anything missing from a query is zero-filled, and query-only features cannot be
   projected (the reference PCA has no loading for them) and are dropped with a warning.
 - **Near-constant reference features are clipped.** If a feature barely varied across the
   reference, dividing a query's deviation by that tiny standard deviation can turn a trivial

@@ -5,11 +5,21 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import squidpy as sq
-from scipy.sparse import csr_array
+from scipy.sparse import csr_array, diags_array, issparse
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.neighbors import radius_neighbors_graph
 
 from phenocoder.utils import quiet_spatialdata_logging
+
+
+class EmptyGraphError(ValueError):
+    """Raised when a neighbor graph has no edges, so there is nothing spatial to measure.
+
+    Not a bug but an expected outcome for a sample whose cells are all further apart than
+    the requested radius -- most often a unit mismatch between ``radii`` and the
+    coordinates (e.g. a radius in mm against micron coordinates). Callers treat it as a
+    reason to skip the sample rather than as a failure.
+    """
 
 
 class SpatialGraphAnalyzer:
@@ -95,62 +105,6 @@ class SpatialGraphAnalyzer:
         self.results: dict = {}
         self.results_global: pd.DataFrame | None = None
 
-    def get_chull(
-        self,
-        radius: int = 100,
-        degree_threshold: int = 5,
-    ) -> pd.DataFrame:
-        """
-        Calculate convex hull volume, area, and density for spatial data.
-
-        Operates on ``self.adata`` (uses the 'z', 'centroid-0', 'centroid-1' obs columns).
-
-        Args:
-            radius (int): Radius for neighbor graph construction. Defaults to 100.
-            degree_threshold (int): Minimum degree threshold for filtering points. Defaults to 5.
-
-        Returns:
-            pd.DataFrame: DataFrame containing convex hull volume, area, and density metrics.
-        """
-        coordinate_cols = ['z', 'centroid-0', 'centroid-1']
-        df = self.adata.obs[coordinate_cols]
-        if len(df) < 4:
-            return pd.DataFrame(
-                {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[self.index],
-            )
-        pts = df.to_numpy()
-        # neighbor graph
-        graph = nx.from_numpy_array(
-            radius_neighbors_graph(
-                pts, radius, mode='distance', include_self=False
-            ).toarray(),
-            create_using=nx.DiGraph,
-        )
-        A = nx.adjacency_matrix(graph, weight=None)
-        degrees = np.sum(A, axis=1)
-        # filter df with degrees
-        df_filtered = df[degrees > degree_threshold]
-        if len(df_filtered) < 4:
-            return pd.DataFrame(
-                {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[self.index],
-            )
-        pts = df_filtered[coordinate_cols].to_numpy()
-        for i in range(pts.shape[-1]):
-            if len(np.unique(pts[:, i])) == 1:
-                return pd.DataFrame(
-                    {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                    index=[self.index],
-                )
-        chull = ConvexHull(pts)
-        df_results = pd.DataFrame(
-            {'volume_chull': chull.volume, 'area_chull': chull.area},
-            index=[self.index],
-        )
-        df_results['density_chull'] = len(pts) / df_results['volume_chull']
-        return df_results
-
     def get_chulls_connected_components(
         self, clusters: list, radius: int = 100, min_nds: int = 10, min_degree: int = 4
     ) -> pd.DataFrame:
@@ -224,8 +178,9 @@ class SpatialGraphAnalyzer:
                     },
                     index=[str(i)],
                 )
+                # cells per unit volume, so the value rises as a component gets denser
                 df_component['density_chull'] = (
-                    df_component['volume_chull'] / df_component['n_chull']
+                    df_component['n_chull'] / df_component['volume_chull']
                 )
                 df.append(df_component)
         if len(df) == 0:
@@ -263,7 +218,15 @@ class SpatialGraphAnalyzer:
             ).tolist()
             df_interaction.columns = cluster_names
             df_interaction.index = cluster_names
-            df_interaction = df_interaction.stack().reset_index()
+            # squidpy returns the full category x category matrix but leaves an all-NaN
+            # row/column for a category with no cells here. A plain .stack() drops those
+            # entries, which silently shrank the feature set: with A-D declared but only
+            # A and B present, the C-D and D-C pairs disappeared entirely. Keep them and
+            # fill 0 -- an interaction count that is absent means these two clusters never
+            # co-occur in this sample.
+            df_interaction = (
+                df_interaction.stack(future_stack=True).fillna(0.0).reset_index()
+            )
             df_interaction.columns = ['from', 'to', 'count']
             if i:
                 df_interaction.index = (
@@ -298,9 +261,16 @@ class SpatialGraphAnalyzer:
         adata = self.adata.copy()
         # .sum() on the sparse matrix is O(nnz) and gives the same number as
         # np.sum(.toarray()), which densified an n x n matrix just to test emptiness.
+        #
+        # run() rejects an edgeless graph up front (EmptyGraphError in get_spatial_stats),
+        # so this only fires for a caller invoking the method directly on one. Columns must
+        # still match the normal path's, or the caller gets a differently-shaped row.
         if adata.obsp.get('spatial_connectivities').sum() == 0:
-            df_moran = pd.DataFrame(0, index=[self.index], columns=adata.var_names)
-            return df_moran
+            return pd.DataFrame(
+                0,
+                index=[self.index],
+                columns=['moranI_' + str(name) for name in adata.var_names],
+            )
         sq.gr.spatial_autocorr(
             adata,
             mode='moran',
@@ -335,10 +305,18 @@ class SpatialGraphAnalyzer:
         adata_cl = ad.AnnData(
             df, obs=self.adata.obs, obsm=self.adata.obsm, obsp=self.adata.obsp
         )
-        # O(nnz) emptiness test; see get_moran.
+        # O(nnz) emptiness test; see get_moran. As there, run() rejects an edgeless graph
+        # before reaching this, so it only fires on a direct call.
+        #
+        # The columns are the one-hot cluster names, not self.adata.var_names -- those are
+        # the *feature* names, which gave this branch both the wrong names and the wrong
+        # column count (n_vars instead of n_categories).
         if self.adata.obsp.get('spatial_connectivities').sum() == 0:
-            df_moran = pd.DataFrame(0, index=[self.index], columns=self.adata.var_names)
-            return df_moran
+            return pd.DataFrame(
+                0,
+                index=[self.index],
+                columns=['moranI_' + str(name) for name in adata_cl.var_names],
+            )
         sq.gr.spatial_autocorr(
             adata_cl,
             mode='moran',
@@ -350,6 +328,10 @@ class SpatialGraphAnalyzer:
             show_progress_bar=False,
         )
         df_moran = pd.DataFrame(adata_cl.uns['moranI'])
+        # spatial_autocorr sorts its result by Moran's I, descending, so the row order
+        # follows the data rather than the label set and varies between samples.
+        # Reindex onto the one-hot column order to make it deterministic.
+        df_moran = df_moran.reindex(list(adata_cl.var_names))
         df_moran = df_moran[['I']].T
         df_moran.index = [self.index]
         # add moranI prefix to all columns
@@ -358,33 +340,60 @@ class SpatialGraphAnalyzer:
 
     def get_centrality(self) -> pd.DataFrame:
         """
-        Calculate centrality scores between clusters.
+        Calculate centrality scores per cluster.
 
-        Computes pairwise centrality scores that measure how central each cluster
-        is relative to other clusters in the spatial graph.
+        These are *group* centrality measures over each cluster's node set, not per-node
+        ones averaged within a cluster: squidpy delegates to
+        :func:`networkx.group_degree_centrality` and
+        :func:`networkx.group_closeness_centrality`, plus
+        :func:`networkx.average_clustering`. Group closeness is
+        ``|V - S| / sum(d(S, v))``, which is **not** bounded by 1 -- fragmented graphs
+        routinely give values above it.
+
+        A cluster with no cells in this sample scores 0 for every measure, so the feature
+        set follows the full label set rather than whichever labels are present here. Note
+        that a cluster which *is* present but has no neighbors within the radius also
+        scores 0, so 0 alone does not distinguish the two; ``count_{cluster}`` from the
+        ``counts`` group does, when that group is requested.
 
         Returns:
-            pd.DataFrame: DataFrame containing centrality scores for each cluster pair, with one row
-                indexed by self.index and columns named 'centrality_{from}_{to}'.
+            pd.DataFrame: One row indexed by self.index, with columns named
+                ``centrality_{cluster}_{degree_centrality|average_clustering|closeness_centrality}``.
         """
-        # centrality scores
-        sq.gr.centrality_scores(
-            self.adata, cluster_key=self.cluster_key, connectivity_key='spatial'
-        )
-        df_centrality = pd.DataFrame(
-            self.adata.uns[f'{self.cluster_key}_centrality_scores']
-        )
         cluster_names = pd.Categorical(
             self.adata.obs[self.cluster_key].cat.categories
         ).tolist()
-        df_centrality.index = cluster_names
+        # squidpy scores every *category* of the cluster column, and average_clustering
+        # divides by the node count, so a declared-but-absent category raises
+        # ZeroDivisionError and (via the try/except in spatialgraph_stats) used to drop the
+        # whole sample. Score only the categories that have cells, then reindex onto the
+        # full label set. Restricting the categorical leaves the graph untouched, so the
+        # present clusters' scores are identical to scoring them on their own.
+        present = [
+            cluster
+            for cluster in cluster_names
+            if (self.adata.obs[self.cluster_key] == cluster).sum() > 0
+        ]
+        adata = self.adata
+        if len(present) < len(cluster_names):
+            adata = adata.copy()
+            adata.obs[self.cluster_key] = pd.Categorical(
+                adata.obs[self.cluster_key].astype(str), categories=present
+            )
+
+        sq.gr.centrality_scores(
+            adata, cluster_key=self.cluster_key, connectivity_key='spatial'
+        )
+        df_centrality = pd.DataFrame(adata.uns[f'{self.cluster_key}_centrality_scores'])
+        df_centrality.index = present
+        df_centrality = df_centrality.reindex(cluster_names).fillna(0.0)
         # pivot wide new column names are column_names-index
         df_centrality = df_centrality.stack().reset_index()
-        df_centrality.columns = ['from', 'to', 'value']
+        df_centrality.columns = ['cluster', 'metric', 'value']
         df_centrality.index = (
-            'centrality_' + df_centrality['from'] + '_' + df_centrality['to']
+            'centrality_' + df_centrality['cluster'] + '_' + df_centrality['metric']
         )
-        df_centrality = df_centrality.drop(columns=['from', 'to'])
+        df_centrality = df_centrality.drop(columns=['cluster', 'metric'])
         df_centrality = df_centrality.T
         df_centrality.index = [self.index]
         return df_centrality
@@ -396,55 +405,43 @@ class SpatialGraphAnalyzer:
         Computes the mean and standard deviation of node degrees (number of neighbors)
         both globally and per cluster.
 
+        A cluster with no cells in this sample reports a degree of 0, so the feature set
+        follows the full label set rather than whichever labels are present here. Note that
+        a cluster which *is* present but has no neighbors within the radius also reports 0,
+        so 0 alone does not distinguish the two; ``count_{cluster}`` from the ``counts``
+        group does, when that group is requested.
+
         Returns:
             pd.DataFrame: DataFrame with one row indexed by self.index containing:
                 - 'mean': Mean degree across all nodes
                 - 'std': Standard deviation of degree across all nodes
-                - 'mean_degree_{cluster}': Mean degree for each cluster
-                - 'std_degree_{cluster}': Standard deviation of degree for each cluster
+                - 'degree_{cluster}_mean': Mean degree for each cluster
+                - 'degree_{cluster}_std': Standard deviation of degree for each cluster
         """
         # get mean connectivity
         degrees = self.adata.obsp['spatial_connectivities'].sum(axis=0)
-        mean_degree = degrees.mean()
-        std_degree = degrees.std()
+        degrees = np.asarray(degrees).ravel()
         df_degree = pd.DataFrame(
-            {'mean': mean_degree, 'std': std_degree}, index=[self.index]
+            {'mean': degrees.mean(), 'std': degrees.std()}, index=[self.index]
         )
-        # for each cluster
+        # Per cluster. Built column by column rather than via stack/pivot_table: an absent
+        # category makes degrees[mask] empty, whose mean/std are NaN, and pivot_table drops
+        # all-NaN rows -- so those clusters used to vanish from the feature set entirely
+        # while the other cluster-aware groups kept them.
         cluster_names = pd.Categorical(
             self.adata.obs[self.cluster_key].cat.categories
         ).tolist()
-        mean_degree_cluster = [
-            degrees[:, self.adata.obs[self.cluster_key] == cluster].mean()
-            for cluster in cluster_names
-        ]
-        str_degree_cluster = [
-            degrees[:, self.adata.obs[self.cluster_key] == cluster].std()
-            for cluster in cluster_names
-        ]
-        df_degree_cluster = pd.DataFrame(
-            {'mean': mean_degree_cluster, 'std': str_degree_cluster},
-            index=cluster_names,
-        )
-        # pivot wide and merge with df_degree
-        df_degree_cluster = df_degree_cluster.stack().reset_index()
-        df_degree_cluster.columns = ['from', 'metric', 'value']
-        df_degree_cluster = df_degree_cluster.pivot_table(
-            index='from', columns='metric', values='value'
-        )
-        df_degree_cluster.index = 'degree_' + df_degree_cluster.index
-        df_degree_cluster = df_degree_cluster.T
-        df_degree_cluster = df_degree_cluster.stack().reset_index()
-        df_degree_cluster.columns = ['from', 'metric', 'value']
-        df_degree_cluster['metric_combined'] = (
-            df_degree_cluster['metric'] + '_' + df_degree_cluster['from']
-        )
-        df_degree_cluster = df_degree_cluster.drop(columns=['from', 'metric'])
-        # pivot wide so 1 row remains
-        df_degree_cluster = df_degree_cluster.pivot_table(
-            columns='metric_combined', values='value'
-        )
-        df_degree_cluster.index = [self.index]
+        labels = self.adata.obs[self.cluster_key].to_numpy()
+        per_cluster = {}
+        for cluster in cluster_names:
+            cluster_degrees = degrees[labels == cluster]
+            if cluster_degrees.size == 0:
+                per_cluster[f'degree_{cluster}_mean'] = 0.0
+                per_cluster[f'degree_{cluster}_std'] = 0.0
+            else:
+                per_cluster[f'degree_{cluster}_mean'] = cluster_degrees.mean()
+                per_cluster[f'degree_{cluster}_std'] = cluster_degrees.std()
+        df_degree_cluster = pd.DataFrame(per_cluster, index=[self.index])
         df_degree = pd.concat([df_degree, df_degree_cluster], axis=1)
         return df_degree
 
@@ -492,6 +489,12 @@ class SpatialGraphAnalyzer:
 
         Returns:
             dict: Mapping of stat-group name to its result DataFrame.
+
+        Raises:
+            ValueError: If ``cluster_key`` is None.
+            EmptyGraphError: If no cell lies within ``radius`` of another, so the neighbor
+                graph has no edges. Not raised when only radius-independent groups
+                (``chull``, ``counts``) were requested, since those never build the graph.
         """
         if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
@@ -506,6 +509,17 @@ class SpatialGraphAnalyzer:
                     self.adata,
                     radius=radius,
                     spatial_key=self.spatial_key,
+                )
+            # A graph with no edges has no spatial structure to describe: every
+            # graph-derived statistic collapses to 0 (or, for Moran's I, to undefined),
+            # leaving a row that looks like a measurement but only carries cluster
+            # composition -- which is radius-independent anyway. Refuse it here rather
+            # than emit that row. O(nnz) emptiness test; see get_moran.
+            if self.adata.obsp['spatial_connectivities'].sum() == 0:
+                raise EmptyGraphError(
+                    f'No cell is within radius {radius} of another, so the neighbor '
+                    f'graph has no edges and no spatial statistic is defined. Check that '
+                    f'radii matches the units of obsm["{self.spatial_key}"].'
                 )
         clusters = self.adata.obs[self.cluster_key].unique().tolist()
 
@@ -610,31 +624,51 @@ def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
     Smooth latent representations over a spatial neighborhood graph.
 
     Builds a radius-based spatial connectivity graph in physical space, adds self-loops,
-    and applies a degree-normalized adjacency matrix ``A' = (A + I) · D⁻¹`` to ``adata.X``.
-    Each object's smoothed latent is the (degree-normalized) average of itself and its
-    spatial neighbors. The result is stored in ``adata.layers['spatial_message_passing']``.
+    and applies a row-normalized adjacency matrix ``A' = D⁻¹ · (A + I)`` to ``adata.X``.
+    Each object's smoothed latent is the unweighted mean of itself and its spatial
+    neighbors, so smoothed values stay within the range of the inputs. The result is
+    stored in ``adata.layers['spatial_message_passing']``.
 
     Args:
-        adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates in ``.obsm['spatial']``
-            (falls back to the 'x', 'y', 'z' obs columns if 'spatial' is missing).
+        adata (ad.AnnData): Annotated data with latents in ``.X`` and spatial coordinates
+            in ``.obsm['spatial']``.
         radius (int): Radius (in spatial units) used to connect neighboring objects.
 
     Returns:
         ad.AnnData: The same object, with the smoothed latents added as
             ``.layers['spatial_message_passing']``.
+
+    Raises:
+        ValueError: If ``.obsm['spatial']`` is missing.
     """
     # calculate knn graph in physical space
-    if adata.obsm['spatial'] is None:
-        adata.obsm['spatial'] = adata.obs[['x', 'y', 'z']].values.copy()
+    if 'spatial' not in adata.obsm:
+        raise ValueError(
+            "'spatial' not found in adata.obsm, so there are no coordinates to build "
+            f'the neighborhood graph from. Available keys: {list(adata.obsm.keys())}'
+        )
     with quiet_spatialdata_logging():
         sq.gr.spatial_neighbors_radius(adata, radius=radius, spatial_key='spatial')
     A = adata.obsp['spatial_connectivities'].copy()
     A = A + csr_array(np.diag(np.ones(A.shape[0])))
     # weight A with inverse degree matrix
     D = np.array(A.sum(axis=1)).flatten()
-    D_inv = np.power(D, -1)
+    D_inv = np.power(D, -1.0)
     D_inv[np.isinf(D_inv)] = 0
-    D_inv = np.diag(D_inv)
-    A = A.dot(D_inv)
-    adata.layers['spatial_message_passing'] = np.dot(A, adata.X)
+    # Row-normalize: row i of D_inv @ A scales node i's whole neighborhood by 1/d_i, so
+    # each smoothed latent is the mean over {i} U N(i). Multiplying the other way round
+    # (A @ D_inv) scales *columns* by 1/d_j, which weights each neighbor by its own degree
+    # and does not average -- hub values then land outside the input range.
+    #
+    # D_inv must stay a 1-D vector here. np.diag(D_inv).dot(A) dispatches to NumPy, which
+    # does not understand a sparse operand and silently returns an object-dtype array of
+    # sparse matrices instead of numbers; diags_array keeps SciPy in charge.
+    A = diags_array(D_inv) @ A
+    # A stays sparse, so A @ X is sparse too; layers are expected to be dense arrays
+    # matching .X, and np.asarray on a sparse matrix yields a 0-d object array rather
+    # than densifying it.
+    smoothed = A @ adata.X
+    adata.layers['spatial_message_passing'] = (
+        smoothed.toarray() if issparse(smoothed) else np.asarray(smoothed)
+    )
     return adata

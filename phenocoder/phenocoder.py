@@ -26,7 +26,11 @@ from phenocoder.reference import (
     load_transform,
 )
 from phenocoder.reference import save_transform as save_reference_transform
-from phenocoder.spatial import SpatialGraphAnalyzer, spatial_message_passing
+from phenocoder.spatial import (
+    EmptyGraphError,
+    SpatialGraphAnalyzer,
+    spatial_message_passing,
+)
 from phenocoder.utils import (
     _coerce_stringdtype_uns,
     write_training_plots_to_tensorboard,
@@ -889,6 +893,13 @@ class Phenocoder:
             sample (if use_subunits=False) or per subunit (if use_subunits=True)
             containing all computed spatial statistics.
 
+            A sample or subunit is skipped, with a warning, when it has no cells, when it
+            has one cluster or fewer, or when no cell lies within any requested radius of
+            another. The last case leaves no spatial structure to measure -- every
+            graph-derived statistic would be 0 -- and usually means ``radii`` does not
+            match the units of the spatial coordinates. If every sample is skipped this
+            way, the per-sample warnings name the radius involved.
+
         Example:
             >>> # Sample-level analysis
             >>> phenocoder.spatialgraph_stats(
@@ -1070,6 +1081,15 @@ class Phenocoder:
                     df_subunit['subunit_n_obs'] = len(subunit_obs_indices)
 
                     results.append(df_subunit)
+                except EmptyGraphError as e:
+                    # Not a failure: there is genuinely nothing spatial to measure. Always
+                    # reported, unlike the verbose-gated warnings around it -- an edgeless
+                    # graph usually means radii does not match the coordinate units, which
+                    # would otherwise silently drop every subunit.
+                    tqdm.write(
+                        f'Warning: Sample {sample}, subunit {subunit_key} skipped: {e}'
+                    )
+                    continue
                 except Exception as e:
                     if verbose:
                         tqdm.write(
@@ -1141,6 +1161,10 @@ class Phenocoder:
                     sga.run()
                     df_sample = sga.to_df()
                     results.append(df_sample)
+                except EmptyGraphError as e:
+                    # Not a failure; see the subunit branch above.
+                    tqdm.write(f'Warning: Sample {sample} skipped: {e}')
+                    continue
                 except Exception as e:
                     tqdm.write(
                         f'Warning: Failed to compute stats for sample {sample}: {str(e)}'
