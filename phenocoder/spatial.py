@@ -303,33 +303,60 @@ class SpatialGraphAnalyzer:
 
     def get_centrality(self) -> pd.DataFrame:
         """
-        Calculate centrality scores between clusters.
+        Calculate centrality scores per cluster.
 
-        Computes pairwise centrality scores that measure how central each cluster
-        is relative to other clusters in the spatial graph.
+        These are *group* centrality measures over each cluster's node set, not per-node
+        ones averaged within a cluster: squidpy delegates to
+        :func:`networkx.group_degree_centrality` and
+        :func:`networkx.group_closeness_centrality`, plus
+        :func:`networkx.average_clustering`. Group closeness is
+        ``|V - S| / sum(d(S, v))``, which is **not** bounded by 1 -- fragmented graphs
+        routinely give values above it.
+
+        A cluster with no cells in this sample scores 0 for every measure, so the feature
+        set follows the full label set rather than whichever labels are present here. Note
+        that a cluster which *is* present but has no neighbors within the radius also
+        scores 0, so 0 alone does not distinguish the two; ``count_{cluster}`` from the
+        ``counts`` group does, when that group is requested.
 
         Returns:
-            pd.DataFrame: DataFrame containing centrality scores for each cluster pair, with one row
-                indexed by self.index and columns named 'centrality_{from}_{to}'.
+            pd.DataFrame: One row indexed by self.index, with columns named
+                ``centrality_{cluster}_{degree_centrality|average_clustering|closeness_centrality}``.
         """
-        # centrality scores
-        sq.gr.centrality_scores(
-            self.adata, cluster_key=self.cluster_key, connectivity_key='spatial'
-        )
-        df_centrality = pd.DataFrame(
-            self.adata.uns[f'{self.cluster_key}_centrality_scores']
-        )
         cluster_names = pd.Categorical(
             self.adata.obs[self.cluster_key].cat.categories
         ).tolist()
-        df_centrality.index = cluster_names
+        # squidpy scores every *category* of the cluster column, and average_clustering
+        # divides by the node count, so a declared-but-absent category raises
+        # ZeroDivisionError and (via the try/except in spatialgraph_stats) used to drop the
+        # whole sample. Score only the categories that have cells, then reindex onto the
+        # full label set. Restricting the categorical leaves the graph untouched, so the
+        # present clusters' scores are identical to scoring them on their own.
+        present = [
+            cluster
+            for cluster in cluster_names
+            if (self.adata.obs[self.cluster_key] == cluster).sum() > 0
+        ]
+        adata = self.adata
+        if len(present) < len(cluster_names):
+            adata = adata.copy()
+            adata.obs[self.cluster_key] = pd.Categorical(
+                adata.obs[self.cluster_key].astype(str), categories=present
+            )
+
+        sq.gr.centrality_scores(
+            adata, cluster_key=self.cluster_key, connectivity_key='spatial'
+        )
+        df_centrality = pd.DataFrame(adata.uns[f'{self.cluster_key}_centrality_scores'])
+        df_centrality.index = present
+        df_centrality = df_centrality.reindex(cluster_names).fillna(0.0)
         # pivot wide new column names are column_names-index
         df_centrality = df_centrality.stack().reset_index()
-        df_centrality.columns = ['from', 'to', 'value']
+        df_centrality.columns = ['cluster', 'metric', 'value']
         df_centrality.index = (
-            'centrality_' + df_centrality['from'] + '_' + df_centrality['to']
+            'centrality_' + df_centrality['cluster'] + '_' + df_centrality['metric']
         )
-        df_centrality = df_centrality.drop(columns=['from', 'to'])
+        df_centrality = df_centrality.drop(columns=['cluster', 'metric'])
         df_centrality = df_centrality.T
         df_centrality.index = [self.index]
         return df_centrality
@@ -341,55 +368,43 @@ class SpatialGraphAnalyzer:
         Computes the mean and standard deviation of node degrees (number of neighbors)
         both globally and per cluster.
 
+        A cluster with no cells in this sample reports a degree of 0, so the feature set
+        follows the full label set rather than whichever labels are present here. Note that
+        a cluster which *is* present but has no neighbors within the radius also reports 0,
+        so 0 alone does not distinguish the two; ``count_{cluster}`` from the ``counts``
+        group does, when that group is requested.
+
         Returns:
             pd.DataFrame: DataFrame with one row indexed by self.index containing:
                 - 'mean': Mean degree across all nodes
                 - 'std': Standard deviation of degree across all nodes
-                - 'mean_degree_{cluster}': Mean degree for each cluster
-                - 'std_degree_{cluster}': Standard deviation of degree for each cluster
+                - 'degree_{cluster}_mean': Mean degree for each cluster
+                - 'degree_{cluster}_std': Standard deviation of degree for each cluster
         """
         # get mean connectivity
         degrees = self.adata.obsp['spatial_connectivities'].sum(axis=0)
-        mean_degree = degrees.mean()
-        std_degree = degrees.std()
+        degrees = np.asarray(degrees).ravel()
         df_degree = pd.DataFrame(
-            {'mean': mean_degree, 'std': std_degree}, index=[self.index]
+            {'mean': degrees.mean(), 'std': degrees.std()}, index=[self.index]
         )
-        # for each cluster
+        # Per cluster. Built column by column rather than via stack/pivot_table: an absent
+        # category makes degrees[mask] empty, whose mean/std are NaN, and pivot_table drops
+        # all-NaN rows -- so those clusters used to vanish from the feature set entirely
+        # while the other cluster-aware groups kept them.
         cluster_names = pd.Categorical(
             self.adata.obs[self.cluster_key].cat.categories
         ).tolist()
-        mean_degree_cluster = [
-            degrees[:, self.adata.obs[self.cluster_key] == cluster].mean()
-            for cluster in cluster_names
-        ]
-        str_degree_cluster = [
-            degrees[:, self.adata.obs[self.cluster_key] == cluster].std()
-            for cluster in cluster_names
-        ]
-        df_degree_cluster = pd.DataFrame(
-            {'mean': mean_degree_cluster, 'std': str_degree_cluster},
-            index=cluster_names,
-        )
-        # pivot wide and merge with df_degree
-        df_degree_cluster = df_degree_cluster.stack().reset_index()
-        df_degree_cluster.columns = ['from', 'metric', 'value']
-        df_degree_cluster = df_degree_cluster.pivot_table(
-            index='from', columns='metric', values='value'
-        )
-        df_degree_cluster.index = 'degree_' + df_degree_cluster.index
-        df_degree_cluster = df_degree_cluster.T
-        df_degree_cluster = df_degree_cluster.stack().reset_index()
-        df_degree_cluster.columns = ['from', 'metric', 'value']
-        df_degree_cluster['metric_combined'] = (
-            df_degree_cluster['metric'] + '_' + df_degree_cluster['from']
-        )
-        df_degree_cluster = df_degree_cluster.drop(columns=['from', 'metric'])
-        # pivot wide so 1 row remains
-        df_degree_cluster = df_degree_cluster.pivot_table(
-            columns='metric_combined', values='value'
-        )
-        df_degree_cluster.index = [self.index]
+        labels = self.adata.obs[self.cluster_key].to_numpy()
+        per_cluster = {}
+        for cluster in cluster_names:
+            cluster_degrees = degrees[labels == cluster]
+            if cluster_degrees.size == 0:
+                per_cluster[f'degree_{cluster}_mean'] = 0.0
+                per_cluster[f'degree_{cluster}_std'] = 0.0
+            else:
+                per_cluster[f'degree_{cluster}_mean'] = cluster_degrees.mean()
+                per_cluster[f'degree_{cluster}_std'] = cluster_degrees.std()
+        df_degree_cluster = pd.DataFrame(per_cluster, index=[self.index])
         df_degree = pd.concat([df_degree, df_degree_cluster], axis=1)
         return df_degree
 
