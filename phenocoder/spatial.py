@@ -95,62 +95,6 @@ class SpatialGraphAnalyzer:
         self.results: dict = {}
         self.results_global: pd.DataFrame | None = None
 
-    def get_chull(
-        self,
-        radius: int = 100,
-        degree_threshold: int = 5,
-    ) -> pd.DataFrame:
-        """
-        Calculate convex hull volume, area, and density for spatial data.
-
-        Operates on ``self.adata`` (uses the 'z', 'centroid-0', 'centroid-1' obs columns).
-
-        Args:
-            radius (int): Radius for neighbor graph construction. Defaults to 100.
-            degree_threshold (int): Minimum degree threshold for filtering points. Defaults to 5.
-
-        Returns:
-            pd.DataFrame: DataFrame containing convex hull volume, area, and density metrics.
-        """
-        coordinate_cols = ['z', 'centroid-0', 'centroid-1']
-        df = self.adata.obs[coordinate_cols]
-        if len(df) < 4:
-            return pd.DataFrame(
-                {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[self.index],
-            )
-        pts = df.to_numpy()
-        # neighbor graph
-        graph = nx.from_numpy_array(
-            radius_neighbors_graph(
-                pts, radius, mode='distance', include_self=False
-            ).toarray(),
-            create_using=nx.DiGraph,
-        )
-        A = nx.adjacency_matrix(graph, weight=None)
-        degrees = np.sum(A, axis=1)
-        # filter df with degrees
-        df_filtered = df[degrees > degree_threshold]
-        if len(df_filtered) < 4:
-            return pd.DataFrame(
-                {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                index=[self.index],
-            )
-        pts = df_filtered[coordinate_cols].to_numpy()
-        for i in range(pts.shape[-1]):
-            if len(np.unique(pts[:, i])) == 1:
-                return pd.DataFrame(
-                    {'volume_chull': 0, 'area_chull': 0, 'density_chull': 0},
-                    index=[self.index],
-                )
-        chull = ConvexHull(pts)
-        df_results = pd.DataFrame(
-            {'volume_chull': chull.volume, 'area_chull': chull.area},
-            index=[self.index],
-        )
-        df_results['density_chull'] = len(pts) / df_results['volume_chull']
-        return df_results
-
     def get_chulls_connected_components(
         self, clusters: list, radius: int = 100, min_nds: int = 10, min_degree: int = 4
     ) -> pd.DataFrame:
@@ -224,8 +168,9 @@ class SpatialGraphAnalyzer:
                     },
                     index=[str(i)],
                 )
+                # cells per unit volume, so the value rises as a component gets denser
                 df_component['density_chull'] = (
-                    df_component['volume_chull'] / df_component['n_chull']
+                    df_component['n_chull'] / df_component['volume_chull']
                 )
                 df.append(df_component)
         if len(df) == 0:
