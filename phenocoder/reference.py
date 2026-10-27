@@ -141,7 +141,7 @@ def save_transform(
         path = path / TRANSFORM_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    payload = {
+    transform = {
         'scaler': scaler,
         'pca': pca,
         'umap': umap_model,
@@ -152,7 +152,7 @@ def save_transform(
         'stats_groups': list(stats_groups) if stats_groups is not None else None,
         'scale': scale,
     }
-    joblib.dump(payload, path)
+    joblib.dump(transform, path)
     return path
 
 
@@ -165,7 +165,7 @@ def load_transform(path: str | Path) -> dict:
             holding it.
 
     Returns:
-        dict: The stored payload.
+        dict: The stored transform.
 
     Raises:
         FileNotFoundError: If no transform exists at ``path``.
@@ -182,7 +182,7 @@ def load_transform(path: str | Path) -> dict:
 
 
 def check_stats_config(
-    payload: dict,
+    transform: dict,
     cluster_key: str | None,
     radii: tuple[int, ...] | None,
     stats_groups: list[str] | None,
@@ -198,7 +198,7 @@ def check_stats_config(
     carry identical column names but incomparable values.
 
     Args:
-        payload (dict): Loaded reference transform.
+        transform (dict): Loaded reference transform.
         cluster_key (str | None): Query's cluster key, or None to skip the check.
         radii (tuple[int, ...] | None): Query's radii, or None to skip.
         stats_groups (list[str] | None): Query's stat groups, or None to skip.
@@ -209,7 +209,7 @@ def check_stats_config(
         ValueError: On any mismatch.
     """
     if cluster_categories is not None:
-        ref_cats = list(payload.get('cluster_categories') or [])
+        ref_cats = list(transform.get('cluster_categories') or [])
         if ref_cats and list(cluster_categories) != ref_cats:
             only_query = sorted(set(cluster_categories) - set(ref_cats))
             only_ref = sorted(set(ref_cats) - set(cluster_categories))
@@ -222,28 +222,28 @@ def check_stats_config(
                 'labels onto the query rather than clustering it independently.'
             )
 
-    if cluster_key is not None and cluster_key != payload['cluster_key']:
+    if cluster_key is not None and cluster_key != transform['cluster_key']:
         raise ValueError(
             f'Query used cluster_key={cluster_key!r} but the reference was built with '
-            f'{payload["cluster_key"]!r}.'
+            f'{transform["cluster_key"]!r}.'
         )
-    if radii is not None and tuple(radii) != tuple(payload['radii']):
+    if radii is not None and tuple(radii) != tuple(transform['radii']):
         raise ValueError(
             f'Query used radii={tuple(radii)} but the reference was built with '
-            f'{tuple(payload["radii"])}. Statistics at different radii share column names '
+            f'{tuple(transform["radii"])}. Statistics at different radii share column names '
             f'but are not comparable.'
         )
-    if stats_groups is not None and payload['stats_groups'] is not None:
-        if sorted(stats_groups) != sorted(payload['stats_groups']):
+    if stats_groups is not None and transform['stats_groups'] is not None:
+        if sorted(stats_groups) != sorted(transform['stats_groups']):
             raise ValueError(
                 f'Query computed stats={sorted(stats_groups)} but the reference used '
-                f'{sorted(payload["stats_groups"])}.'
+                f'{sorted(transform["stats_groups"])}.'
             )
 
 
 def apply_transform(
     df: pd.DataFrame,
-    payload: dict,
+    transform: dict,
     allow_extra: bool = True,
     umap: bool = True,
     clip: float | None = 10.0,
@@ -256,7 +256,7 @@ def apply_transform(
 
     Args:
         df (pd.DataFrame): Query statistics, one row per sample/subunit.
-        payload (dict): Loaded reference transform.
+        transform (dict): Loaded reference transform.
         allow_extra (bool, optional): Drop query-only features with a warning rather than
             raising. Defaults to True.
         umap (bool, optional): Also project into the reference UMAP, if one was saved.
@@ -277,11 +277,11 @@ def apply_transform(
         ``clip`` bounds that. The same features are harmless in the pooled fit path, because
         there the scale is derived from the very data being scaled.
     """
-    aligned = align_features(df, payload['var_names'], allow_extra=allow_extra)
+    aligned = align_features(df, transform['var_names'], allow_extra=allow_extra)
     X = aligned.to_numpy(dtype=np.float64)
 
-    if payload['scale'] and payload['scaler'] is not None:
-        X = payload['scaler'].transform(X)
+    if transform['scale'] and transform['scaler'] is not None:
+        X = transform['scaler'].transform(X)
         # Constant-variance reference features scale to NaN; zero them as the fit path does.
         X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
         if clip is not None:
@@ -295,10 +295,10 @@ def apply_transform(
                 )
             X = np.clip(X, -clip, clip)
 
-    X_pca = payload['pca'].transform(X)
+    X_pca = transform['pca'].transform(X)
 
     X_umap = None
-    if umap and payload.get('umap') is not None:
-        X_umap = payload['umap'].transform(X_pca)
+    if umap and transform.get('umap') is not None:
+        X_umap = transform['umap'].transform(X_pca)
 
     return X_pca, X_umap

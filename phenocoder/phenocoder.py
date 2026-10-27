@@ -1211,6 +1211,7 @@ class Phenocoder:
         obs_keys: str | list[str] | None = None,
         save_transform: bool = False,
         transform_path: str | Path | None = None,
+        min_variance: float | None = None,
     ) -> None:
         """
         Generate spatial graph embeddings from all samples.
@@ -1251,6 +1252,13 @@ class Phenocoder:
                 with ``batch_correction``. Defaults to False.
             transform_path (str | Path | None, optional): Where to write the transform.
                 Defaults to ``dir_project/reference/embedding_transform.joblib``.
+            min_variance (float | None, optional): Drop features whose variance across
+                samples (raw values, ddof=0) is at or below this before scaling. Scaling
+                divides by their near-zero standard deviation, so in a saved reference a
+                small query difference on one of them becomes hundreds of standard
+                deviations. Dropped features leave ``var_names``, and
+                :meth:`~phenocoder.Phenocoder.spatialgraph_map_query` then drops them from
+                the query too. Defaults to None (keep all).
 
         Returns:
             None
@@ -1348,6 +1356,21 @@ class Phenocoder:
                 mapping = table.obs.groupby(self.sample_key)[key].first()
                 mapping.index = mapping.index.astype(str)
                 self.adata.obs[key] = sample_ids.map(mapping.to_dict()).values
+
+        if min_variance is not None:
+            X = self.adata.X
+            X = X.toarray() if hasattr(X, 'toarray') else np.asarray(X)
+            var = np.nanvar(X, axis=0)
+            keep = var > min_variance
+            if not keep.any():
+                raise ValueError(
+                    f'min_variance={min_variance} drops all {keep.size} features.'
+                )
+            print(
+                f'Dropping {int((~keep).sum())} of {keep.size} features with variance '
+                f'<= {min_variance}.'
+            )
+            self.adata = self.adata[:, keep].copy()
 
         # Store raw data
         self.adata.layers['raw'] = self.adata.X.copy()
@@ -1564,7 +1587,7 @@ class Phenocoder:
                 'statistics to project.'
             )
 
-        payload = load_transform(
+        transform = load_transform(
             transform_path if transform_path is not None else self.dir_reference
         )
 
@@ -1578,7 +1601,7 @@ class Phenocoder:
                 )
             else:
                 check_stats_config(
-                    payload,
+                    transform,
                     cluster_key=self.stats_config['cluster_key'],
                     radii=self.stats_config['radii'],
                     stats_groups=self.stats_config['stats'],
@@ -1587,7 +1610,7 @@ class Phenocoder:
 
         df = self.adata.to_df()
         X_pca, X_umap = apply_transform(
-            df, payload, allow_extra=allow_extra, umap=umap, clip=clip
+            df, transform, allow_extra=allow_extra, umap=umap, clip=clip
         )
 
         self.adata.layers['raw'] = self.adata.X.copy()
