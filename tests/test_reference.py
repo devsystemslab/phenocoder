@@ -270,7 +270,7 @@ def test_near_constant_reference_feature_is_clipped():
     pca = PCA(n_components=1, svd_solver='arpack', random_state=0).fit(
         scaler.transform(ref)
     )
-    payload = {
+    transform = {
         'scaler': scaler,
         'pca': pca,
         'umap': None,
@@ -282,10 +282,10 @@ def test_near_constant_reference_feature_is_clipped():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter('always')
-        X_clipped, _ = apply_transform(query, payload, clip=10.0)
+        X_clipped, _ = apply_transform(query, transform, clip=10.0)
     assert any('Clipped' in str(w.message) for w in caught)
 
-    X_unclipped, _ = apply_transform(query, payload, clip=None)
+    X_unclipped, _ = apply_transform(query, transform, clip=None)
     assert np.abs(X_clipped).max() < np.abs(X_unclipped).max()
     assert np.isfinite(X_clipped).all()
 
@@ -386,3 +386,31 @@ def test_default_embedding_still_uses_scanpy(tmp_path):
     # scanpy's PCA records loadings in varm; the sklearn path does not
     assert 'PCs' in pheno.adata.varm
     assert not (pheno.dir_reference / 'embedding_transform.joblib').exists()
+
+
+def test_min_variance_drops_features_from_reference_and_query(tmp_path):
+    """Near-constant reference features leave the saved space, and a query is projected
+    without them (they arrive as query-only features and are dropped)."""
+    pheno = _pheno(tmp_path)
+    pheno.spatialgraph_stats(
+        cluster_key='leiden', spatial_key='spatial', radii=(25, 50), table_key='cells'
+    )
+    var = np.var(np.asarray(pheno.adata.X), axis=0)
+    assert (var == 0).any()  # the toy statistics include constant features
+    pheno.spatialgraph_embedding(
+        n_dim=5,
+        umap=False,
+        n_neighbors=5,
+        save_transform=True,
+        min_variance=1e-12,
+    )
+    transform = load_transform(pheno.dir_reference / 'embedding_transform.joblib')
+    assert len(transform['var_names']) == int((var > 1e-12).sum())
+    assert (np.var(pheno.adata.layers['raw'], axis=0) > 1e-12).all()
+
+    query = _pheno(tmp_path, seed=7)
+    query.spatialgraph_stats(
+        cluster_key='leiden', spatial_key='spatial', radii=(25, 50), table_key='cells'
+    )
+    query.spatialgraph_map_query(umap=False)
+    assert np.isfinite(query.adata.obsm['X_pca']).all()
