@@ -837,6 +837,7 @@ class Phenocoder:
         max_obs_per_subunit: int | None = None,
         verbose: bool = False,
         progress: bool = True,
+        min_clusters: int = 2,
     ) -> None:
         """
         Generate statistics for spatial neighborhood graphs of each sample or subunit.
@@ -880,6 +881,12 @@ class Phenocoder:
                 subunit partitioning. Defaults to False.
             progress (bool, optional): Whether to display tqdm progress bars while
                 partitioning samples and computing statistics. Defaults to True.
+            min_clusters (int, optional): Skip a sample or subunit with fewer clusters than
+                this. With 1, a one-cluster sample is encoded: its interactions and
+                cluster autocorrelation are trivial, but counts, connectivity, centrality,
+                hulls and feature autocorrelation are defined. Recorded in
+                ``stats_config``; a reference and its queries must use the same value.
+                Defaults to 2.
 
         Returns:
             None
@@ -894,8 +901,8 @@ class Phenocoder:
             containing all computed spatial statistics.
 
             A sample or subunit is skipped, with a warning, when it has no cells, when it
-            has one cluster or fewer, or when no cell lies within any requested radius of
-            another. The last case leaves no spatial structure to measure -- every
+            has fewer than ``min_clusters`` clusters, or when no cell lies within any
+            requested radius of another. The last case leaves no spatial structure to measure -- every
             graph-derived statistic would be 0 -- and usually means ``radii`` does not
             match the units of the spatial coordinates. If every sample is skipped this
             way, the per-sample warnings name the radius involved.
@@ -1050,11 +1057,11 @@ class Phenocoder:
                     continue
 
                 n_clusters = len(adata_subunit.obs[cluster_key].unique())
-                if n_clusters <= 1:
+                if n_clusters < min_clusters:
                     if verbose:
                         tqdm.write(
                             f'Warning: Sample {sample}, subunit {subunit_key} has '
-                            f'{n_clusters} cluster(s), skipping (need >1 for spatial stats).'
+                            f'{n_clusters} cluster(s), skipping (min_clusters={min_clusters}).'
                         )
                     continue
 
@@ -1139,10 +1146,10 @@ class Phenocoder:
                     continue
 
                 n_clusters = len(adata_sample.obs[cluster_key].unique())
-                if n_clusters <= 1:
+                if n_clusters < min_clusters:
                     tqdm.write(
                         f'Warning: Sample {sample} has {n_clusters} cluster(s), '
-                        f'skipping (need >1 for spatial stats).'
+                        f'skipping (min_clusters={min_clusters}).'
                     )
                     continue
 
@@ -1196,6 +1203,7 @@ class Phenocoder:
             'radii': tuple(radii),
             'stats': list(stats) if stats is not None else None,
             'cluster_categories': cluster_categories,
+            'min_clusters': min_clusters,
         }
 
     def spatialgraph_embedding(
@@ -1523,6 +1531,7 @@ class Phenocoder:
                 radii=self.stats_config['radii'],
                 stats_groups=self.stats_config['stats'],
                 scale=scale,
+                min_clusters=self.stats_config.get('min_clusters', 2),
             )
             print(f'Saved embedding transform to {path}')
 
@@ -1606,6 +1615,7 @@ class Phenocoder:
                     radii=self.stats_config['radii'],
                     stats_groups=self.stats_config['stats'],
                     cluster_categories=self.stats_config['cluster_categories'],
+                    min_clusters=self.stats_config.get('min_clusters', 2),
                 )
 
         df = self.adata.to_df()

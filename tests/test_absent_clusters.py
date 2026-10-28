@@ -212,3 +212,38 @@ def test_isolated_cluster_is_not_distinguishable_from_an_absent_one():
     assert sga.results[25]['connectivity'].iloc[0]['degree_C_mean'] == 0.0
     # identical to the absent case above -- only the count tells them apart
     assert sga.results_global.iloc[0]['count_C'] == 1
+
+
+# --- one-cluster samples (spatialgraph_stats(min_clusters=1)) -------------------------
+
+
+def test_one_cluster_sample_gives_the_full_feature_row():
+    """A sample whose cells all share one cluster yields the same columns as a two-cluster
+    one. squidpy's group centrality divides by the nodes outside the group, so this used
+    to raise ZeroDivisionError. NaN is left only where an absent cluster leaves it too:
+    Moran's I of a constant cluster indicator (spatialgraph_stats fills it with 0)."""
+    groups = [*CLUSTER_AWARE_GROUPS, 'moran_features', 'counts']
+    one = _features(_adata(['A'], ['A', 'B', 'C'], n_per=40), stats=groups)
+    two = _features(_adata(['A', 'B'], ['A', 'B', 'C']), stats=groups)
+
+    assert list(one.columns) == list(two.columns)
+    nan = one.columns[one.isna().iloc[0].to_numpy()]
+    assert all('stat:moran_clusters' in c for c in nan)
+
+
+def test_one_cluster_centrality():
+    """The whole-graph cluster scores 0 for degree and closeness (no nodes outside it) and
+    networkx's average clustering of the graph."""
+    import networkx as nx
+
+    sga = _analyzer(_adata(['A'], ['A', 'B'], n_per=40), stats=['centrality'])
+    sga.run()
+    row = sga.results[25]['centrality'].iloc[0]
+
+    graph = nx.from_scipy_sparse_array(sga.adata.obsp['spatial_connectivities'])
+    assert row['centrality_A_degree_centrality'] == 0.0
+    assert row['centrality_A_closeness_centrality'] == 0.0
+    assert row['centrality_A_average_clustering'] == pytest.approx(
+        nx.average_clustering(graph)
+    )
+    assert row['centrality_B_average_clustering'] == 0.0

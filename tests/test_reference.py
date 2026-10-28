@@ -304,6 +304,21 @@ def test_radii_mismatch_is_rejected(tmp_path):
         query.spatialgraph_map_query()
 
 
+def test_min_clusters_mismatch_is_rejected(tmp_path):
+    """A reference that skipped one-cluster samples cannot take a query that kept them."""
+    _fit_reference(tmp_path)
+    query = _pheno(tmp_path, seed=5)
+    query.spatialgraph_stats(
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25, 50),
+        table_key='cells',
+        min_clusters=1,
+    )
+    with pytest.raises(ValueError, match='min_clusters'):
+        query.spatialgraph_map_query()
+
+
 def test_cluster_key_mismatch_is_rejected(tmp_path):
     _fit_reference(tmp_path)
     query = _pheno(tmp_path, seed=5)

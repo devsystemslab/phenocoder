@@ -374,18 +374,37 @@ class SpatialGraphAnalyzer:
             for cluster in cluster_names
             if (self.adata.obs[self.cluster_key] == cluster).sum() > 0
         ]
-        adata = self.adata
-        if len(present) < len(cluster_names):
-            adata = adata.copy()
-            adata.obs[self.cluster_key] = pd.Categorical(
-                adata.obs[self.cluster_key].astype(str), categories=present
+        if len(present) == 1:
+            # One cluster is the whole graph (spatialgraph_stats(min_clusters=1)). Group
+            # degree and closeness divide by the nodes outside the group, which do not
+            # exist, so squidpy raises ZeroDivisionError; both are set to 0. Average
+            # clustering is still defined and is what squidpy computes for a cluster:
+            # networkx.average_clustering over its nodes on the full graph.
+            graph = nx.from_scipy_sparse_array(
+                self.adata.obsp['spatial_connectivities']
             )
-
-        sq.gr.centrality_scores(
-            adata, cluster_key=self.cluster_key, connectivity_key='spatial'
-        )
-        df_centrality = pd.DataFrame(adata.uns[f'{self.cluster_key}_centrality_scores'])
-        df_centrality.index = present
+            df_centrality = pd.DataFrame(
+                {
+                    'degree_centrality': [0.0],
+                    'average_clustering': [nx.average_clustering(graph)],
+                    'closeness_centrality': [0.0],
+                },
+                index=present,
+            )
+        else:
+            adata = self.adata
+            if len(present) < len(cluster_names):
+                adata = adata.copy()
+                adata.obs[self.cluster_key] = pd.Categorical(
+                    adata.obs[self.cluster_key].astype(str), categories=present
+                )
+            sq.gr.centrality_scores(
+                adata, cluster_key=self.cluster_key, connectivity_key='spatial'
+            )
+            df_centrality = pd.DataFrame(
+                adata.uns[f'{self.cluster_key}_centrality_scores']
+            )
+            df_centrality.index = present
         df_centrality = df_centrality.reindex(cluster_names).fillna(0.0)
         # pivot wide new column names are column_names-index
         df_centrality = df_centrality.stack().reset_index()
@@ -498,8 +517,6 @@ class SpatialGraphAnalyzer:
         """
         if self.cluster_key is None:
             raise ValueError('cluster_key must be provided')
-
-        assert len(self.adata.obs[self.cluster_key].unique()) > 1
 
         # The neighbor graph (spatial_connectivities) is needed by every stat group except
         # chull and counts; skip building it if only those were requested.
