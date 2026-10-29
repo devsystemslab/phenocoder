@@ -247,3 +247,45 @@ if __name__ == '__main__':
     test_spatial_stats_subset()
     test_spatial_stats_chull_thresholds()
     test_spatial_stats_invalid_stat()
+
+
+def test_spatialgraph_stats_min_clusters():
+    """One-cluster samples are skipped by default and encoded with min_clusters=1."""
+    import anndata as ad
+    import numpy as np
+    import pandas as pd
+    import spatialdata as sd
+
+    import phenocoder as phc
+
+    rng = np.random.default_rng(0)
+    labels = ['A'] * 40 + ['A'] * 20 + ['B'] * 20  # s0: one cluster; s1: two
+    adata = ad.AnnData(rng.normal(size=(80, 4)))
+    adata.obs = pd.DataFrame(
+        {
+            'leiden': pd.Categorical(labels, categories=['A', 'B']),
+            'well': ['s0'] * 40 + ['s1'] * 40,
+            'region': 'cells',
+            'instance_id': np.arange(80),
+        },
+        index=[str(i) for i in range(80)],
+    )
+    adata.obsm['spatial'] = rng.uniform(0, 40, size=(80, 3))
+    adata.var_names = [f'g{i}' for i in range(4)]
+    table = sd.models.TableModel.parse(
+        adata, region='cells', region_key='region', instance_key='instance_id'
+    )
+
+    for min_clusters, expected in ((2, ['s1']), (1, ['s0', 's1'])):
+        pheno = phc.Phenocoder(table_key='cells', sample_key='well')
+        pheno.add_sdata(sd.SpatialData(tables={'cells': table.copy()}))
+        pheno.spatialgraph_stats(
+            cluster_key='leiden',
+            radii=(25,),
+            table_key='cells',
+            progress=False,
+            min_clusters=min_clusters,
+        )
+        assert sorted(pheno.adata.obs_names) == expected
+        assert pheno.stats_config['min_clusters'] == min_clusters
+        assert np.isfinite(pheno.adata.X).all()

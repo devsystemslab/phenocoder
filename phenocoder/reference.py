@@ -116,6 +116,7 @@ def save_transform(
     radii: tuple[int, ...],
     stats_groups: list[str] | None,
     scale: bool,
+    min_clusters: int = 2,
 ) -> Path:
     """
     Persist a fitted embedding space.
@@ -132,6 +133,8 @@ def save_transform(
         radii (tuple[int, ...]): Radii the statistics were computed at.
         stats_groups (list[str] | None): Stat groups computed, or None for all.
         scale (bool): Whether scaling was applied.
+        min_clusters (int, optional): ``spatialgraph_stats``' sample filter. Defaults
+            to 2.
 
     Returns:
         Path: The file written.
@@ -151,6 +154,7 @@ def save_transform(
         'radii': tuple(radii),
         'stats_groups': list(stats_groups) if stats_groups is not None else None,
         'scale': scale,
+        'min_clusters': min_clusters,
     }
     joblib.dump(transform, path)
     return path
@@ -187,6 +191,7 @@ def check_stats_config(
     radii: tuple[int, ...] | None,
     stats_groups: list[str] | None,
     cluster_categories: list[str] | None = None,
+    min_clusters: int | None = None,
 ) -> None:
     """
     Verify the query's statistics were computed the same way as the reference's.
@@ -204,6 +209,8 @@ def check_stats_config(
         stats_groups (list[str] | None): Query's stat groups, or None to skip.
         cluster_categories (list[str] | None, optional): Query's full cluster label set, or
             None to skip. Defaults to None.
+        min_clusters (int | None, optional): Query's ``min_clusters``, or None to skip. A
+            transform saved before the option existed counts as 2. Defaults to None.
 
     Raises:
         ValueError: On any mismatch.
@@ -239,6 +246,12 @@ def check_stats_config(
                 f'Query computed stats={sorted(stats_groups)} but the reference used '
                 f'{sorted(transform["stats_groups"])}.'
             )
+    if min_clusters is not None and min_clusters != transform.get('min_clusters', 2):
+        raise ValueError(
+            f'Query used min_clusters={min_clusters} but the reference was built with '
+            f'{transform.get("min_clusters", 2)}: one-cluster samples were encoded on one '
+            f'side only.'
+        )
 
 
 def apply_transform(
