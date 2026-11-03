@@ -1,8 +1,33 @@
 from __future__ import annotations
 
+import hashlib
+
 import anndata as ad
 import numpy as np
 import pandas as pd
+
+
+def sample_seed(base: int, sample: object) -> int:
+    """
+    Derive a stable per-sample seed from a base seed and a sample name.
+
+    Each sample is partitioned by its own sampler, so they cannot share one seed:
+    a single int would hand every sample the identical draw sequence, correlating
+    their subsamples, while a bare counter would make a sample's draw depend on how
+    many samples happened to precede it.
+
+    Uses blake2b rather than the builtin ``hash()``, whose string hashing is salted
+    per process via ``PYTHONHASHSEED`` and so would vary between runs.
+
+    Args:
+        base (int): The run-level seed.
+        sample (object): The sample identifier; stringified before hashing.
+
+    Returns:
+        int: A seed in ``[0, 2**32)``, stable across processes and platforms.
+    """
+    digest = hashlib.blake2b(f'{base}:{sample}'.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, 'big') % (2**32)
 
 
 class SpatialSubunitSampler:
@@ -13,12 +38,18 @@ class SpatialSubunitSampler:
         min_obs: int,
         spatial_key: str,
         verbose: bool = False,
+        random_state: int | np.random.Generator | None = 0,
     ):
         self.adata = adata
         self.dim_subunit = dim_subunit
         self.min_obs = min_obs
         self.spatial_key = spatial_key
         self.verbose = verbose
+        self.random_state = random_state
+        # Pinned by default so that a run with max_obs set is reproducible, matching
+        # the rest of the package (PCA random_state=0, SeedGenerator(42)). Pass
+        # random_state=None for draws seeded from OS entropy.
+        self._rng = np.random.default_rng(random_state)
         self.subunits = None
 
     def partition(self) -> None:
@@ -141,8 +172,8 @@ class SpatialSubunitSampler:
             print(f'Total observations: {total_before} → {total_after}')
 
     def _random_sample(self, n_points, n_samples):
-        """Random subsampling"""
-        return np.random.choice(n_points, n_samples, replace=False)
+        """Random subsampling, drawn from the instance RNG so runs are reproducible."""
+        return self._rng.choice(n_points, n_samples, replace=False)
 
     def to_df(self) -> pd.DataFrame:
         """
@@ -155,19 +186,16 @@ class SpatialSubunitSampler:
             pd.DataFrame: One row per observation, with a ``subunit_id`` column and
                 the observation index (``obs_index``) as the DataFrame index.
         """
-        # Pre-calculate total number of rows
-        total_obs = sum(len(data['obs_indices']) for data in self.subunits.values())
-
-        # Pre-allocate arrays
+        # Observation names are arbitrary strings (e.g. cell barcodes like
+        # "AAACCCA-1"), so these are collected as objects rather than coerced
+        # through an integer array.
         subunit_ids = []
-        obs_indices = np.zeros(total_obs, dtype=int)
+        obs_indices = []
 
-        idx = 0
         for subunit_id, subunit_data in self.subunits.items():
-            n_obs = len(subunit_data['obs_indices'])
-            subunit_ids.extend([str(subunit_id)] * n_obs)
-            obs_indices[idx : idx + n_obs] = subunit_data['obs_indices']
-            idx += n_obs
+            names = subunit_data['obs_indices']
+            subunit_ids.extend([str(subunit_id)] * len(names))
+            obs_indices.extend(map(str, names))
 
         # Create DataFrame
         df = pd.DataFrame(
@@ -176,6 +204,5 @@ class SpatialSubunitSampler:
                 'obs_index': obs_indices,
             }
         )
-        df['obs_index'] = df['obs_index'].astype(str)
         df = df.set_index('obs_index')
         return df
