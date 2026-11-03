@@ -835,6 +835,7 @@ class Phenocoder:
         dim_subunit: tuple[int, int, int] = (500, 500, 100),
         min_obs_per_subunit: int = 100,
         max_obs_per_subunit: int | None = None,
+        subunit_random_state: int | None = 0,
         verbose: bool = False,
         progress: bool = True,
         min_clusters: int = 2,
@@ -877,6 +878,12 @@ class Phenocoder:
                 per subunit. Subunits with more observations are randomly subsampled.
                 If None, no subsampling is performed. Only used if use_subunits=True.
                 Defaults to None.
+            subunit_random_state (int | None, optional): Seed for the per-subunit
+                random subsampling draw, so a run with max_obs_per_subunit set is
+                reproducible. Each sample is seeded from this value combined with its
+                sample name, so a sample's draw does not depend on the other samples
+                in the run. Pass None to draw from OS entropy. Only used if
+                use_subunits=True and max_obs_per_subunit is not None. Defaults to 0.
             verbose (bool, optional): Whether to print progress information during
                 subunit partitioning. Defaults to False.
             progress (bool, optional): Whether to display tqdm progress bars while
@@ -993,7 +1000,7 @@ class Phenocoder:
 
         if use_subunits:
             # Import SpatialSubunitSampler
-            from phenocoder.sampling import SpatialSubunitSampler
+            from phenocoder.sampling import SpatialSubunitSampler, sample_seed
 
             # Pass 1: partition every sample so the total subunit count (and thus a
             # meaningful progress total) is known before any statistics are computed.
@@ -1010,13 +1017,20 @@ class Phenocoder:
                     tqdm.write(f'Warning: Sample {sample} has no cells, skipping.')
                     continue
 
-                # Partition into subunits
+                # Partition into subunits. Each sample gets its own sampler, so the
+                # seed is derived per sample rather than shared; see sample_seed().
+                seed = (
+                    None
+                    if subunit_random_state is None
+                    else sample_seed(subunit_random_state, sample)
+                )
                 sampler = SpatialSubunitSampler(
                     adata=adata_sample,
                     dim_subunit=dim_subunit,
                     min_obs=min_obs_per_subunit,
                     spatial_key=spatial_key,
                     verbose=verbose,
+                    random_state=seed,
                 )
                 sampler.partition()
                 sampler.filter()
