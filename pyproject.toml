@@ -54,11 +54,15 @@ filterwarnings = [
     # spatialdata table/region handling
     "ignore:Converting .*region.* to categorical dtype.*:UserWarning",
     "ignore:The table is annotating .*which is not present.*:UserWarning",
-    # squidpy spatial_autocorr Moran permutation on degenerate test graphs
+    # scipy ARPACK matvec, reached via scanpy/sklearn PCA (svd_solver='arpack')
+    # on the near-degenerate test matrices. Traced to scipy's _interface.py, not
+    # to squidpy: spatial_autocorr runs with n_perms=None and no longer permutes.
     "ignore:divide by zero encountered in matmul:RuntimeWarning",
     "ignore:overflow encountered in matmul:RuntimeWarning",
     "ignore:invalid value encountered in matmul:RuntimeWarning",
-    # squidpy interaction-matrix normalization on zero-sum rows (small test graph)
+    # squidpy interaction-matrix normalization on zero-sum rows. Also suppressed at
+    # the call site in spatial.py, so it stays quiet outside pytest too; kept here
+    # for any other caller that normalizes an interaction matrix.
     "ignore:invalid value encountered in divide:RuntimeWarning",
     # keras/tensorflow tensor -> numpy conversion internals
     "ignore:__array__ implementation doesn't accept a copy keyword:DeprecationWarning",
