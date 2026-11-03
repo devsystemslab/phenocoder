@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import anndata as ad
 import networkx as nx
 import numpy as np
@@ -207,9 +209,21 @@ class SpatialGraphAnalyzer:
         # interaction matrix
         results = []
         for i in (True, False):
-            sq.gr.interaction_matrix(
-                self.adata, cluster_key=self.cluster_key, normalized=i
-            )
+            # normalized=True divides each row by its sum, so a cluster with no
+            # interactions here gives 0/0 -> NaN and numpy warns. That case is
+            # expected and handled below (the NaNs are filled with 0.0), so the
+            # warning is noise; it is suppressed around just this call rather than
+            # globally, and only for the normalized pass that can produce it.
+            with warnings.catch_warnings():
+                if i:
+                    warnings.filterwarnings(
+                        'ignore',
+                        message='invalid value encountered in divide',
+                        category=RuntimeWarning,
+                    )
+                sq.gr.interaction_matrix(
+                    self.adata, cluster_key=self.cluster_key, normalized=i
+                )
             df_interaction = pd.DataFrame(
                 self.adata.uns[f'{self.cluster_key}_interactions']
             )
