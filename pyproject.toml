@@ -24,6 +24,23 @@ dependencies = [
     # Pulled in transitively by scanpy, but phenocoder.phenocoder drives umap.UMAP
     # directly (scanpy does not expose the fitted model), so declare it.
     "umap-learn>=0.5.0",
+    # Pulled in by tensorflow (which pins tensorboard ~=2.19.0), but Phenocoder.train
+    # writes TensorBoard logs itself -- keras.callbacks.TensorBoard plus tf.summary in
+    # write_training_plots_to_tensorboard -- and reading them needs the tensorboard CLI.
+    # Floor only, no ceiling: tensorflow's own ~= pin sets the upper bound, so adding one
+    # here could only conflict with it.
+    "tensorboard>=2.19.0",
+    # Imported directly by phenocoder modules rather than only reached through another
+    # library, so they are declared even though scanpy/spatialdata/squidpy happen to
+    # install them today. Without these the package depends on a transitive graph it does
+    # not control: an upstream drop would break the import, not just the resolution.
+    "pandas>=2.3.3",  # generator, sampling, spatial, reference, phenocoder
+    "scikit-learn>=1.9.0",  # PCA, StandardScaler, OneHotEncoder, radius_neighbors_graph
+    "scikit-image>=0.26.0",  # skimage.util.montage in utils.plot_reconstructions
+    "joblib>=1.5.3",  # reference transform persistence
+    "networkx>=3.6.1",  # spatial graph centrality
+    "tqdm>=4.68.3",  # progress bars in generator and phenocoder
+    "PyYAML>=6.0.3",  # model config read/write
 ]
 
 [project.optional-dependencies]
