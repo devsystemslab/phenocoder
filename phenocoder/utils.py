@@ -80,13 +80,13 @@ def quiet_spatialdata_logging(level: int = logging.WARNING):
 
 
 def plot_latent_space(
-    model: "CVAE | CondCVAE",
-    generator: "SequenceGenerator",
-    oh_enc: "OneHotEncoder",
+    model: 'CVAE | CondCVAE',
+    generator: 'SequenceGenerator',
+    oh_enc: 'OneHotEncoder',
     sample_frac: float = 1,
     show: bool = True,
     return_fig: bool = False,
-) -> "Figure | None":
+) -> 'Figure | None':
     """
     Plot UMAP visualization of the latent space colored by dataset and z-position.
 
@@ -154,13 +154,13 @@ def plot_latent_space(
 
 
 def plot_reconstructions(
-    model: "CVAE | CondCVAE",
-    generator: "SequenceGenerator",
+    model: 'CVAE | CondCVAE',
+    generator: 'SequenceGenerator',
     n_preview: int = 200,
     batch_size: int = 64,
     show: bool = True,
     return_fig: bool = False,
-) -> "Figure | None":
+) -> 'Figure | None':
     """
     Plot side-by-side comparison of input images and their VAE reconstructions.
 
@@ -215,7 +215,7 @@ def plot_reconstructions(
         return fig
 
 
-def plot_to_image(figure: "Figure") -> tf.Tensor:
+def plot_to_image(figure: 'Figure') -> tf.Tensor:
     """
     Convert a matplotlib figure to a TensorFlow image tensor.
 
@@ -244,9 +244,9 @@ def plot_to_image(figure: "Figure") -> tf.Tensor:
 
 
 def write_training_plots_to_tensorboard(
-    model: "CVAE | CondCVAE",
-    data_generator_train: "SequenceGenerator",
-    model_oh_enc: "OneHotEncoder",
+    model: 'CVAE | CondCVAE',
+    data_generator_train: 'SequenceGenerator',
+    model_oh_enc: 'OneHotEncoder',
     dir_tensorboard: Path | str,
     n_preview: int = 300,
     plot_frac: float = 0.001,

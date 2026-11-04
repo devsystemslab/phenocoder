@@ -30,9 +30,7 @@ def test_dataset_generator_n_samples():
     exactly one sample is selected and only its patch ``.npy`` files are written.
     """
     pheno = example_3d()
-    n_available = (
-        pheno.sdata.tables['nuclei_features'].obs['well'].nunique()
-    )
+    n_available = pheno.sdata.tables['nuclei_features'].obs['well'].nunique()
     assert n_available > 1  # the test data must have several samples to subset
     data_generator = generator.PatchGenerator(
         sdata=pheno.sdata,
