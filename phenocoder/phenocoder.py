@@ -115,9 +115,19 @@ class Phenocoder:
 
         Any attributes not provided in kwargs will be initialized to None.
         """
-        # Core data containers
+        # Core data containers. The three statistics tables are kept separate so a
+        # subunit run does not overwrite a sample-level one, and so each can be
+        # embedded on its own (see the target argument on spatialgraph_embedding):
+        #   adata               one row per whole sample
+        #   adata_subunits      one row per spatial subunit
+        #   adata_subunits_agg  one row per sample, columns describing how each
+        #                       feature is distributed across that sample's subunits
         self.sdata: sd.SpatialData | None = kwargs.get('sdata', None)
         self.adata: ad.AnnData | None = kwargs.get('adata', None)
+        self.adata_subunits: ad.AnnData | None = kwargs.get('adata_subunits', None)
+        self.adata_subunits_agg: ad.AnnData | None = kwargs.get(
+            'adata_subunits_agg', None
+        )
 
         # Model-related
         self.model: CVAE | CondCVAE | None = kwargs.get('model', None)
@@ -224,6 +234,11 @@ class Phenocoder:
             lines.append(f'adata: {self.adata}')
         else:
             lines.append('adata: None')
+        # Subunit-level tables, only once they exist
+        if self.adata_subunits is not None:
+            lines.append(f'adata_subunits: {self.adata_subunits}')
+        if self.adata_subunits_agg is not None:
+            lines.append(f'adata_subunits_agg: {self.adata_subunits_agg}')
         # Model info
         if self.model is not None:
             model_type = type(self.model).__name__
@@ -1138,11 +1153,16 @@ class Phenocoder:
             ]
             stat_cols = [col for col in df_stats.columns if col not in metadata_cols]
 
-            self.adata = ad.AnnData(
+            adata_subunits = ad.AnnData(
                 X=df_stats[stat_cols].values,
                 obs=df_stats[metadata_cols].reset_index(drop=True),
                 var=pd.DataFrame(index=stat_cols),
             )
+            self.adata_subunits = adata_subunits
+            # self.adata is kept pointing at the subunit table as well: callers written
+            # before adata_subunits existed read the result from here. Built once and
+            # assigned to both names, so neither is a view of the other.
+            self.adata = adata_subunits
 
         else:
             # sample-level analysis
@@ -1220,6 +1240,277 @@ class Phenocoder:
             'min_clusters': min_clusters,
         }
 
+    # Which attribute each public target name refers to, and the call that fills it.
+    _TARGETS = {
+        'adata': ('adata', 'spatialgraph_stats()'),
+        'subunits': ('adata_subunits', 'spatialgraph_stats(use_subunits=True)'),
+        'subunits_agg': ('adata_subunits_agg', 'aggregate_subunits()'),
+    }
+
+    def _resolve_target(self, target: str) -> str:
+        """
+        Map a public target name to the attribute holding that statistics table.
+
+        Args:
+            target (str): One of ``'adata'``, ``'subunits'``, ``'subunits_agg'``.
+
+        Returns:
+            str: Name of the attribute to read and write.
+
+        Raises:
+            ValueError: If the name is unknown, or that table has not been computed.
+        """
+        if target not in self._TARGETS:
+            raise ValueError(
+                f'Unknown target {target!r}. Valid targets: {sorted(self._TARGETS)}.'
+            )
+        attr, producer = self._TARGETS[target]
+        if getattr(self, attr) is None:
+            raise ValueError(
+                f'self.{attr} is None. Run {producer} first to compute the statistics '
+                f'to embed.'
+            )
+        return attr
+
+    def aggregate_subunits(
+        self,
+        descriptors: tuple[str, ...] = ('mean', 'median', 'sd', 'skew'),
+        percentiles: tuple[float, ...] = (0.25, 0.75),
+        min_subunits: int = 2,
+        verbose: bool = False,
+    ) -> None:
+        """
+        Summarize how each subunit-level feature is distributed within every sample.
+
+        Takes the per-subunit statistics in ``self.adata_subunits`` and reduces them to
+        one row per sample, where each column describes the distribution of one feature
+        across that sample's subunits (its mean, spread, skewness and so on). The result
+        is written to ``self.adata_subunits_agg`` and can be embedded with
+        ``spatialgraph_embedding(target='subunits_agg')``.
+
+        Where a subunit-level embedding compares regions, this compares whole samples by
+        their internal spatial heterogeneity: two organoids with the same average
+        composition but different variability across subunits separate here and not in
+        the per-subunit table.
+
+        Args:
+            descriptors (tuple[str, ...], optional): Which distribution descriptors to
+                compute. Supported: ``'mean'``, ``'median'``, ``'sd'``, ``'var'``,
+                ``'min'``, ``'max'``, ``'skew'``, ``'kurt'``, ``'percentile'``.
+                ``'percentile'`` expands to one column per entry in ``percentiles``.
+                Column order follows this argument. Defaults to
+                ``('mean', 'median', 'sd', 'skew')``; ``'kurt'`` is omitted by default as
+                it needs at least 4 subunits and is the noisiest at this feature width.
+            percentiles (tuple[float, ...], optional): Quantiles in [0, 1] to compute when
+                ``'percentile'`` is in ``descriptors``. Defaults to ``(0.25, 0.75)``.
+            min_subunits (int, optional): Skip any sample with fewer than this many
+                subunits. Raised automatically where a requested descriptor needs more
+                (``sd``/``var`` need 2, ``skew`` 3, ``kurt`` 4), since below that pandas
+                returns NaN and a zero-fill would report a fabricated spread of 0.
+                Defaults to 2.
+            verbose (bool, optional): Print the per-sample subunit counts and the
+                resulting feature count. Defaults to False.
+
+        Returns:
+            None: Writes ``self.adata_subunits_agg``, with one row per surviving sample.
+                ``self.adata`` and ``self.adata_subunits`` are left untouched.
+
+        Raises:
+            ValueError: If ``self.adata_subunits`` is unset, if ``sample_key`` is missing
+                from it, if a descriptor name or percentile is invalid, or if no sample
+                has enough subunits for the requested descriptors.
+
+        Note:
+            Features are named ``desc:<descriptor>_<original feature>`` (percentiles as
+            ``desc:p25_...``). The prefix form is deliberate: 588 of the existing subunit
+            features already end in ``_mean``/``_sd``/``_var``, so a suffix could not be
+            told apart from a feature natively named that way.
+
+        Example:
+            >>> pheno.spatialgraph_stats(cluster_key='leiden', use_subunits=True)
+            >>> pheno.aggregate_subunits(descriptors=('mean', 'sd'))
+            >>> pheno.spatialgraph_embedding(
+            ...     n_dim=10, target='subunits_agg', min_variance=0.0
+            ... )
+        """
+        if self.adata_subunits is None:
+            raise ValueError(
+                'self.adata_subunits is None. Run '
+                'spatialgraph_stats(use_subunits=True) first to compute the per-subunit '
+                'statistics to aggregate.'
+            )
+        if self.sample_key is None:
+            raise ValueError(
+                'sample_key is not set on this Phenocoder, so subunits cannot be '
+                'grouped into samples.'
+            )
+        if self.sample_key not in self.adata_subunits.obs.columns:
+            raise ValueError(
+                f'sample_key {self.sample_key!r} not found in adata_subunits.obs. '
+                f'Available columns: {list(self.adata_subunits.obs.columns)}'
+            )
+
+        # Minimum subunits each descriptor needs before pandas returns NaN. sd/var use
+        # ddof=1, skew and kurt need the third and fourth moments to be defined.
+        required = {
+            'mean': 1,
+            'median': 1,
+            'min': 1,
+            'max': 1,
+            'percentile': 1,
+            'sd': 2,
+            'var': 2,
+            'skew': 3,
+            'kurt': 4,
+        }
+
+        descriptors = tuple(descriptors)
+        if not descriptors:
+            raise ValueError('descriptors is empty; pass at least one.')
+        unknown = [d for d in descriptors if d not in required]
+        if unknown:
+            raise ValueError(
+                f'Unknown descriptor(s) {unknown}. '
+                f'Valid descriptors: {sorted(required)}.'
+            )
+        duplicates = sorted({d for d in descriptors if descriptors.count(d) > 1})
+        if duplicates:
+            raise ValueError(f'Duplicate descriptor(s) {duplicates} in descriptors.')
+        if 'percentile' in descriptors:
+            if not len(percentiles):
+                raise ValueError(
+                    "descriptors includes 'percentile' but percentiles is empty."
+                )
+            bad = [q for q in percentiles if not 0.0 <= q <= 1.0]
+            if bad:
+                raise ValueError(f'percentiles must lie in [0, 1]; got {bad}.')
+
+        df = self.adata_subunits.to_df()
+        sample_ids = self.adata_subunits.obs[self.sample_key].astype(str)
+        df[self.sample_key] = sample_ids.values
+
+        # Refuse samples that cannot support the requested descriptors rather than
+        # emitting NaN: the downstream zero-fill would turn an unknown spread into a
+        # reported spread of exactly 0, indistinguishable from a uniform sample. This
+        # mirrors how spatialgraph_stats refuses edgeless graphs and sparse clusters.
+        counts = sample_ids.value_counts()
+        needed = max(required[d] for d in descriptors)
+        threshold = max(needed, min_subunits)
+        binding = max(descriptors, key=lambda d: required[d])
+        keep_samples = counts[counts >= threshold].index.tolist()
+        for sample, n in counts.items():
+            if n < threshold:
+                reason = (
+                    f'{binding!r} needs >= {required[binding]}'
+                    if required[binding] >= min_subunits
+                    else f'min_subunits={min_subunits}'
+                )
+                print(
+                    f'Warning: Sample {sample} has {n} subunit(s); {reason}. '
+                    f'Skipping sample.'
+                )
+        if not keep_samples:
+            raise ValueError(
+                f'No sample has the {threshold} subunits required by '
+                f'descriptors={descriptors} (min_subunits={min_subunits}). '
+                f'Subunit counts: {counts.to_dict()}. Lower min_obs_per_subunit or '
+                f'use a smaller dim_subunit in spatialgraph_stats, or request fewer '
+                f'descriptors.'
+            )
+
+        # Preserve the order samples appear in, rather than value_counts' frequency order.
+        ordered = [s for s in dict.fromkeys(sample_ids.tolist()) if s in keep_samples]
+        df = df[df[self.sample_key].isin(keep_samples)]
+        grouped = df.groupby(self.sample_key, observed=True)
+        feature_names = list(self.adata_subunits.var_names)
+
+        def _labelled(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+            frame = frame.reindex(index=ordered, columns=feature_names)
+            frame.columns = [f'desc:{label}_{name}' for name in frame.columns]
+            return frame
+
+        parts: list[pd.DataFrame] = []
+        for descriptor in descriptors:
+            if descriptor == 'mean':
+                parts.append(_labelled(grouped.mean(), 'mean'))
+            elif descriptor == 'median':
+                parts.append(_labelled(grouped.median(), 'median'))
+            elif descriptor == 'sd':
+                parts.append(_labelled(grouped.std(), 'sd'))
+            elif descriptor == 'var':
+                parts.append(_labelled(grouped.var(), 'var'))
+            elif descriptor == 'min':
+                parts.append(_labelled(grouped.min(), 'min'))
+            elif descriptor == 'max':
+                parts.append(_labelled(grouped.max(), 'max'))
+            elif descriptor == 'skew':
+                parts.append(_labelled(grouped.skew(), 'skew'))
+            elif descriptor == 'kurt':
+                # kurt is not exposed on GroupBy, unlike skew, so it goes through apply.
+                parts.append(
+                    _labelled(
+                        grouped.apply(lambda d: d.kurt(), include_groups=False), 'kurt'
+                    )
+                )
+            elif descriptor == 'percentile':
+                for q in percentiles:
+                    # p25 rather than p0.25; strip the trailing zeros of e.g. 0.50.
+                    label = f'p{q * 100:g}'
+                    parts.append(_labelled(grouped.quantile(q), label))
+
+        df_agg = pd.concat(parts, axis=1)
+
+        # A constant feature gives skew == 0.0 rather than NaN, so anything NaN here is a
+        # genuinely undefined descriptor and the sample filter above should have caught it.
+        n_nan = int(df_agg.isna().to_numpy().sum())
+        if n_nan:
+            print(
+                f'Warning: {n_nan} aggregated value(s) are NaN and were set to 0. This '
+                f'is unexpected after the subunit-count filter -- check for all-NaN '
+                f'features in adata_subunits.'
+            )
+            df_agg = df_agg.fillna(0)
+
+        obs = pd.DataFrame(index=pd.Index(ordered, name=self.sample_key))
+        obs[self.sample_key] = ordered
+        obs['n_subunits'] = counts.reindex(ordered).to_numpy()
+        if 'subunit_n_obs' in self.adata_subunits.obs.columns:
+            # Cells behind each sample's retained subunits, summed.
+            obs['subunit_n_obs'] = (
+                self.adata_subunits.obs.assign(**{self.sample_key: sample_ids.values})
+                .groupby(self.sample_key, observed=True)['subunit_n_obs']
+                .sum()
+                .reindex(ordered)
+                .to_numpy()
+            )
+
+        self.adata_subunits_agg = ad.AnnData(
+            X=df_agg.to_numpy(dtype=float),
+            obs=obs,
+            var=pd.DataFrame(index=list(df_agg.columns)),
+        )
+
+        if verbose:
+            print(
+                f'Aggregated {len(ordered)} sample(s) from '
+                f'{self.adata_subunits.n_obs} subunits: '
+                f'{len(feature_names)} features x {len(descriptors)} descriptor(s) '
+                f'-> {self.adata_subunits_agg.n_vars} columns.'
+            )
+            for sample in ordered:
+                print(f'  {sample}: {counts[sample]} subunits')
+
+        # Recorded so reference mapping can reject a query aggregated differently. Unlike
+        # the subsampling seed, a differing descriptor set is a genuine incompatibility:
+        # align_features would zero-fill the missing descriptor columns and the mismatch
+        # would pass silently.
+        if self.stats_config is None:
+            self.stats_config = {}
+        self.stats_config['aggregation'] = {
+            'descriptors': list(descriptors),
+            'percentiles': list(percentiles) if 'percentile' in descriptors else [],
+        }
+
     def spatialgraph_embedding(
         self,
         n_dim: int,
@@ -1234,6 +1525,7 @@ class Phenocoder:
         save_transform: bool = False,
         transform_path: str | Path | None = None,
         min_variance: float | None = None,
+        target: str = 'adata',
     ) -> None:
         """
         Generate spatial graph embeddings from all samples.
@@ -1281,6 +1573,12 @@ class Phenocoder:
                 deviations. Dropped features leave ``var_names``, and
                 :meth:`~phenocoder.Phenocoder.spatialgraph_map_query` then drops them from
                 the query too. Defaults to None (keep all).
+            target (str, optional): Which statistics table to embed. ``'adata'`` (the
+                default) embeds ``self.adata``, ``'subunits'`` embeds
+                ``self.adata_subunits`` and ``'subunits_agg'`` embeds
+                ``self.adata_subunits_agg`` from
+                :meth:`~phenocoder.Phenocoder.aggregate_subunits`. Results are written
+                back to the table that was embedded. Defaults to ``'adata'``.
 
         Returns:
             None
@@ -1315,12 +1613,76 @@ class Phenocoder:
             ... )
         """
 
-        if self.adata is None:
+        if target == 'adata' and self.adata is None:
             raise ValueError(
                 'self.adata is None. Run spatialgraph_stats() first to compute '
                 'spatial statistics before generating embeddings.'
             )
+        attr = self._resolve_target(target)
+        if attr != 'adata':
+            # The body below works on self.adata throughout and rebinds it once (the
+            # min_variance branch). Point it at the requested table for the duration and
+            # restore afterwards, so the result lands on the table that was asked for and
+            # a failure part-way cannot leave self.adata aliased to another table.
+            previous_adata = self.adata
+            self.adata = getattr(self, attr)
+            try:
+                self._spatialgraph_embedding_impl(
+                    n_dim=n_dim,
+                    scale=scale,
+                    variable_features=variable_features,
+                    batch_correction=batch_correction,
+                    batch_key=batch_key,
+                    confounder_key=confounder_key,
+                    n_neighbors=n_neighbors,
+                    umap=umap,
+                    obs_keys=obs_keys,
+                    save_transform=save_transform,
+                    transform_path=transform_path,
+                    min_variance=min_variance,
+                )
+            finally:
+                setattr(self, attr, self.adata)
+                self.adata = previous_adata
+            return
 
+        self._spatialgraph_embedding_impl(
+            n_dim=n_dim,
+            scale=scale,
+            variable_features=variable_features,
+            batch_correction=batch_correction,
+            batch_key=batch_key,
+            confounder_key=confounder_key,
+            n_neighbors=n_neighbors,
+            umap=umap,
+            obs_keys=obs_keys,
+            save_transform=save_transform,
+            transform_path=transform_path,
+            min_variance=min_variance,
+        )
+
+    def _spatialgraph_embedding_impl(
+        self,
+        n_dim: int,
+        scale: bool,
+        variable_features: bool,
+        batch_correction: bool,
+        batch_key: str | None,
+        confounder_key: str | None,
+        n_neighbors: int,
+        umap: bool,
+        obs_keys: str | list[str] | None,
+        save_transform: bool,
+        transform_path: str | Path | None,
+        min_variance: float | None,
+    ) -> None:
+        """
+        Fit the embedding on ``self.adata``.
+
+        Split out from :meth:`spatialgraph_embedding` so the public method can point
+        ``self.adata`` at another statistics table (see its ``target`` argument) without
+        this logic needing to know which one it is working on.
+        """
         if save_transform and batch_correction:
             # bbknn.ridge_regression mutates .X before PCA and is inherently pooled -- there
             # is no transform-only form, so a saved space could not be reproduced for a
@@ -1546,6 +1908,7 @@ class Phenocoder:
                 stats_groups=self.stats_config['stats'],
                 scale=scale,
                 min_clusters=self.stats_config.get('min_clusters', 2),
+                aggregation=self.stats_config.get('aggregation'),
             )
             print(f'Saved embedding transform to {path}')
 
@@ -1556,6 +1919,7 @@ class Phenocoder:
         allow_extra: bool = True,
         validate_config: bool = True,
         clip: float | None = 10.0,
+        target: str = 'adata',
     ) -> None:
         """
         Project this object's statistics into a saved reference embedding space.
@@ -1582,6 +1946,10 @@ class Phenocoder:
             clip (float | None, optional): Clip scaled values to +/- this many standard
                 deviations before projecting, bounding the influence of features that barely
                 varied in the reference. Pass None to disable. Defaults to 10.0.
+            target (str, optional): Which statistics table to project: ``'adata'``,
+                ``'subunits'`` or ``'subunits_agg'``. Must match what the reference was
+                built from -- project an aggregated query into an aggregated reference.
+                Defaults to ``'adata'``.
 
         Returns:
             None: Coordinates are written to ``self.adata.obsm['X_pca']`` and, when
@@ -1604,11 +1972,12 @@ class Phenocoder:
             >>> query.spatialgraph_map_query('ref/reference/embedding_transform.joblib')
             >>> query.adata.obsm['X_pca']  # in reference coordinates
         """
-        if self.adata is None:
+        if target == 'adata' and self.adata is None:
             raise ValueError(
                 'self.adata is None. Run spatialgraph_stats() first to compute the '
                 'statistics to project.'
             )
+        adata = getattr(self, self._resolve_target(target))
 
         transform = load_transform(
             transform_path if transform_path is not None else self.dir_reference
@@ -1630,14 +1999,15 @@ class Phenocoder:
                     stats_groups=self.stats_config['stats'],
                     cluster_categories=self.stats_config['cluster_categories'],
                     min_clusters=self.stats_config.get('min_clusters', 2),
+                    aggregation=self.stats_config.get('aggregation'),
                 )
 
-        df = self.adata.to_df()
+        df = adata.to_df()
         X_pca, X_umap = apply_transform(
             df, transform, allow_extra=allow_extra, umap=umap, clip=clip
         )
 
-        self.adata.layers['raw'] = self.adata.X.copy()
-        self.adata.obsm['X_pca'] = X_pca
+        adata.layers['raw'] = adata.X.copy()
+        adata.obsm['X_pca'] = X_pca
         if X_umap is not None:
-            self.adata.obsm['X_umap'] = X_umap
+            adata.obsm['X_umap'] = X_umap

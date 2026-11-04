@@ -117,6 +117,7 @@ def save_transform(
     stats_groups: list[str] | None,
     scale: bool,
     min_clusters: int = 2,
+    aggregation: dict | None = None,
 ) -> Path:
     """
     Persist a fitted embedding space.
@@ -135,6 +136,9 @@ def save_transform(
         scale (bool): Whether scaling was applied.
         min_clusters (int, optional): ``spatialgraph_stats``' sample filter. Defaults
             to 2.
+        aggregation (dict | None, optional): ``aggregate_subunits``' descriptor
+            configuration when the reference was built from aggregated subunits, else
+            None. Defaults to None.
 
     Returns:
         Path: The file written.
@@ -155,6 +159,7 @@ def save_transform(
         'stats_groups': list(stats_groups) if stats_groups is not None else None,
         'scale': scale,
         'min_clusters': min_clusters,
+        'aggregation': dict(aggregation) if aggregation is not None else None,
     }
     joblib.dump(transform, path)
     return path
@@ -192,6 +197,7 @@ def check_stats_config(
     stats_groups: list[str] | None,
     cluster_categories: list[str] | None = None,
     min_clusters: int | None = None,
+    aggregation: dict | None = None,
 ) -> None:
     """
     Verify the query's statistics were computed the same way as the reference's.
@@ -211,6 +217,11 @@ def check_stats_config(
             None to skip. Defaults to None.
         min_clusters (int | None, optional): Query's ``min_clusters``, or None to skip. A
             transform saved before the option existed counts as 2. Defaults to None.
+        aggregation (dict | None, optional): Query's ``aggregate_subunits`` descriptor
+            configuration, or None if the query was not aggregated. Checked because
+            ``align_features`` would otherwise zero-fill a descriptor the reference has
+            and the query lacks, letting a genuine mismatch pass silently. Defaults to
+            None.
 
     Raises:
         ValueError: On any mismatch.
@@ -252,6 +263,35 @@ def check_stats_config(
             f'{transform.get("min_clusters", 2)}: one-cluster samples were encoded on one '
             f'side only.'
         )
+
+    # A transform saved before aggregation existed has no 'aggregation' key, which means
+    # the reference was not aggregated -- the same as an explicit None.
+    ref_agg = transform.get('aggregation')
+    if (aggregation is None) != (ref_agg is None):
+        ref_state = 'aggregated subunits' if ref_agg else 'un-aggregated statistics'
+        query_state = (
+            'aggregated subunits' if aggregation else 'un-aggregated statistics'
+        )
+        raise ValueError(
+            f'Query is {query_state} but the reference was built from {ref_state}. '
+            f'Run aggregate_subunits() on both sides or neither.'
+        )
+    if aggregation is not None and ref_agg is not None:
+        q_desc = list(aggregation.get('descriptors') or [])
+        r_desc = list(ref_agg.get('descriptors') or [])
+        if q_desc != r_desc:
+            raise ValueError(
+                f'Query aggregated with descriptors={q_desc} but the reference used '
+                f'{r_desc}. Descriptor columns carry the descriptor in their name, so a '
+                f'mismatch would be zero-filled rather than detected.'
+            )
+        q_pct = list(aggregation.get('percentiles') or [])
+        r_pct = list(ref_agg.get('percentiles') or [])
+        if q_pct != r_pct:
+            raise ValueError(
+                f'Query aggregated with percentiles={q_pct} but the reference used '
+                f'{r_pct}.'
+            )
 
 
 def apply_transform(
