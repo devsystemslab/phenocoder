@@ -34,7 +34,11 @@ dependencies = [
     # library, so they are declared even though scanpy/spatialdata/squidpy happen to
     # install them today. Without these the package depends on a transitive graph it does
     # not control: an upstream drop would break the import, not just the resolution.
-    "pandas>=2.3.3",  # generator, sampling, spatial, reference, phenocoder
+    # Capped below 3 so a fresh `pip install -e .` matches the locked environment.
+    # The code itself passes on pandas 3, but anndata and squidpy still use APIs it
+    # deprecates, so installing against an open floor buries real output under ~133k
+    # Pandas4Warning lines. Revisit once those two support pandas 3 quietly.
+    "pandas>=2.3.3,<3",  # generator, sampling, spatial, reference, phenocoder
     "scikit-learn>=1.9.0",  # PCA, StandardScaler, OneHotEncoder, radius_neighbors_graph
     "scikit-image>=0.26.0",  # skimage.util.montage in utils.plot_reconstructions
     "joblib>=1.5.3",  # reference transform persistence
