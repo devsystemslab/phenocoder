@@ -429,3 +429,106 @@ def test_min_variance_drops_features_from_reference_and_query(tmp_path):
     )
     query.spatialgraph_map_query(umap=False)
     assert np.isfinite(query.adata.obsm['X_pca']).all()
+
+
+# --- aggregated-subunit references ----------------------------------------------------
+
+
+def _fit_aggregated_reference(tmp_path, descriptors=('mean', 'sd'), seed=0):
+    """Reference built from per-sample descriptors of subunit distributions."""
+    pheno = _pheno(tmp_path, seed=seed)
+    pheno.spatialgraph_stats(
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25, 50),
+        table_key='cells',
+        use_subunits=True,
+        dim_subunit=(100, 100, 100),
+        min_obs_per_subunit=5,
+    )
+    pheno.aggregate_subunits(descriptors=descriptors)
+    pheno.spatialgraph_embedding(
+        n_dim=3,
+        target='subunits_agg',
+        min_variance=1e-12,
+        n_neighbors=3,
+        umap=False,
+        save_transform=True,
+    )
+    return pheno
+
+
+def test_aggregated_reference_roundtrips(tmp_path):
+    """An aggregated query projects into an aggregated reference."""
+    _fit_aggregated_reference(tmp_path)
+    query = _pheno(tmp_path, seed=5)
+    query.spatialgraph_stats(
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25, 50),
+        table_key='cells',
+        use_subunits=True,
+        dim_subunit=(100, 100, 100),
+        min_obs_per_subunit=5,
+    )
+    query.aggregate_subunits(descriptors=('mean', 'sd'))
+
+    query.spatialgraph_map_query(umap=False, target='subunits_agg')
+
+    X_pca = query.adata_subunits_agg.obsm['X_pca']
+    assert X_pca.shape[1] == 3
+    assert np.isfinite(X_pca).all()
+
+
+def test_descriptor_mismatch_is_rejected(tmp_path):
+    """Descriptor columns are named per descriptor, so a mismatch would zero-fill.
+
+    align_features cannot catch this: the reference's desc:sd_* columns are simply
+    absent from a mean-only query and would be filled with 0 under allow_extra.
+    """
+    _fit_aggregated_reference(tmp_path, descriptors=('mean', 'sd'))
+    query = _pheno(tmp_path, seed=5)
+    query.spatialgraph_stats(
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25, 50),
+        table_key='cells',
+        use_subunits=True,
+        dim_subunit=(100, 100, 100),
+        min_obs_per_subunit=5,
+    )
+    query.aggregate_subunits(descriptors=('mean',))
+
+    with pytest.raises(ValueError, match='descriptors'):
+        query.spatialgraph_map_query(umap=False, target='subunits_agg')
+
+
+def test_unaggregated_query_rejected_by_aggregated_reference(tmp_path):
+    _fit_aggregated_reference(tmp_path)
+    query = _pheno(tmp_path, seed=5)
+    query.spatialgraph_stats(
+        cluster_key='leiden', spatial_key='spatial', radii=(25, 50), table_key='cells'
+    )
+
+    with pytest.raises(ValueError, match='un-aggregated'):
+        query.spatialgraph_map_query(umap=False)
+
+
+def test_existing_transform_without_aggregation_key_still_loads(tmp_path):
+    """A reference saved before aggregation existed counts as un-aggregated."""
+    pheno = _fit_reference(tmp_path, umap=False)
+    transform = load_transform(pheno.dir_reference / 'embedding_transform.joblib')
+    assert transform['aggregation'] is None
+
+    del transform['aggregation']
+    from phenocoder.reference import check_stats_config
+
+    check_stats_config(
+        transform,
+        cluster_key=pheno.stats_config['cluster_key'],
+        radii=pheno.stats_config['radii'],
+        stats_groups=pheno.stats_config['stats'],
+        cluster_categories=pheno.stats_config['cluster_categories'],
+        min_clusters=2,
+        aggregation=None,
+    )

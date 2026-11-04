@@ -334,6 +334,50 @@ pheno.spatialgraph_stats(
 )
 ```
 
+The three statistics tables live side by side, so a subunit run never overwrites a
+sample-level one:
+
+| attribute | rows | produced by |
+| --- | --- | --- |
+| `pheno.adata` | one per whole sample | `spatialgraph_stats()` |
+| `pheno.adata_subunits` | one per subunit | `spatialgraph_stats(use_subunits=True)` |
+| `pheno.adata_subunits_agg` | one per sample | `aggregate_subunits()` |
+
+### Per-sample embedding over subunit distributions
+
+A subunit-level embedding compares regions. To compare whole *samples* by how
+heterogeneous they are internally, summarize each subunit feature's distribution within
+every sample with {meth}`~phenocoder.Phenocoder.aggregate_subunits`, then embed that:
+
+```python
+pheno.aggregate_subunits(descriptors=("mean", "median", "sd", "skew"))
+
+pheno.spatialgraph_embedding(
+    n_dim=10,
+    target="subunits_agg",   # 'adata' | 'subunits' | 'subunits_agg'
+    min_variance=0.0,
+)
+```
+
+Two organoids with the same average composition but different spread across their
+subunits separate here and not in the per-subunit table. Available descriptors are
+`mean`, `median`, `sd`, `var`, `min`, `max`, `skew`, `kurt` and `percentile` (driven by
+the `percentiles` argument); columns are named `desc:<descriptor>_<feature>`.
+
+Two things worth setting deliberately:
+
+- **`min_variance`.** Aggregating thousands of subunit features over a handful of samples
+  leaves many constant columns, and scaling divides by their near-zero standard
+  deviation. Dropping them keeps the PCA on features that actually vary.
+- **Sparse samples are refused, not fudged.** `sd` needs at least 2 subunits, `skew` 3 and
+  `kurt` 4; below that the descriptor is undefined. Such samples are skipped with a
+  warning rather than zero-filled, since a reported spread of 0 is indistinguishable from
+  a genuinely uniform sample.
+
+For reference mapping, aggregate both sides with the same `descriptors`:
+{meth}`~phenocoder.Phenocoder.spatialgraph_map_query` takes the same `target` argument and
+rejects a query whose descriptor set differs from the reference's.
+
 ## Standalone spatial graph analysis
 
 The spatial graph analysis does **not** depend on the CVAE.

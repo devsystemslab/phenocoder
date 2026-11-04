@@ -112,6 +112,29 @@ def test_workflow():
     assert pheno.adata.obsm['X_umap'].shape[0] == n_subunits
     assert pheno.adata.obsm['X_umap'].shape[1] == 2
 
+    # Test 4: per-sample embedding over the distribution of each subunit feature
+    n_samples = pheno.adata_subunits.obs[pheno.sample_key].nunique()
+    n_subunit_features = pheno.adata_subunits.n_vars
+
+    pheno.aggregate_subunits(descriptors=('mean', 'sd'), verbose=True)
+
+    assert pheno.adata_subunits_agg.shape == (n_samples, n_subunit_features * 2)
+    assert pheno.adata_subunits_agg.obs[pheno.sample_key].nunique() == n_samples
+
+    # min_variance matters here: aggregating thousands of subunit features over a
+    # handful of samples leaves many constant columns, which scaling would amplify.
+    pheno.spatialgraph_embedding(
+        n_dim=2,
+        target='subunits_agg',
+        min_variance=0.0,
+        n_neighbors=n_samples - 1,
+        umap=False,
+    )
+
+    assert pheno.adata_subunits_agg.obsm['X_pca'].shape == (n_samples, 2)
+    # The subunit-level embedding from Test 3 is still intact and distinct.
+    assert pheno.adata_subunits.obsm['X_pca'].shape[0] == n_subunits
+
     shutil.rmtree('tests/data/tmp/phenocoder')
 
 
