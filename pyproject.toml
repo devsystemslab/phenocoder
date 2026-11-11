@@ -50,6 +50,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ipdb>=0.13.13",
+    "ipykernel>=7.4.0",
     "ipython>=8.37.0",
     "pytest>=8.4.2",
     "pytest-cov>=7.0",
