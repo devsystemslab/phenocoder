@@ -349,17 +349,6 @@ def test_batch_correction_rejected_in_save_path(tmp_path):
         )
 
 
-def test_variable_features_rejected_in_save_path(tmp_path):
-    pheno = _pheno(tmp_path)
-    pheno.spatialgraph_stats(
-        cluster_key='leiden', spatial_key='spatial', radii=(25, 50), table_key='cells'
-    )
-    with pytest.raises(ValueError, match='variable_features'):
-        pheno.spatialgraph_embedding(
-            n_dim=5, save_transform=True, variable_features=True
-        )
-
-
 def test_save_transform_requires_stats_config(tmp_path):
     """Without a stats run we cannot record what the features mean."""
     pheno = _pheno(tmp_path)

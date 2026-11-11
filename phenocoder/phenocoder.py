@@ -1515,7 +1515,6 @@ class Phenocoder:
         self,
         n_dim: int,
         scale: bool = True,
-        variable_features: bool = False,
         batch_correction: bool = False,
         batch_key: str = None,
         confounder_key: str = None,
@@ -1542,8 +1541,6 @@ class Phenocoder:
         Args:
             n_dim (int): Number of principal components to compute.
             scale (bool, optional): Whether to scale the data. Defaults to True.
-            variable_features (bool, optional): Whether to select highly variable features.
-                Defaults to False.
             batch_correction (bool, optional): Whether to apply batch correction using BBKNN.
                 Defaults to False.
             batch_key (str | None, optional): Column name in adata.obs or sdata.tables to use
@@ -1567,12 +1564,25 @@ class Phenocoder:
             transform_path (str | Path | None, optional): Where to write the transform.
                 Defaults to ``dir_project/reference/embedding_transform.joblib``.
             min_variance (float | None, optional): Drop features whose variance across
-                samples (raw values, ddof=0) is at or below this before scaling. Scaling
-                divides by their near-zero standard deviation, so in a saved reference a
-                small query difference on one of them becomes hundreds of standard
-                deviations. Dropped features leave ``var_names``, and
+                samples (raw values, ddof=0) is at or below this before scaling. Intended
+                as a numerical guard rather than a feature-selection knob: in a saved
+                reference, a feature with standard deviation 1e-4 turns a raw query
+                difference of 0.01 into 92 standard deviations, which then dominates the
+                projection. A small absolute value (e.g. ``1e-8``) removes those without
+                touching anything that genuinely varies. Dropped features leave
+                ``var_names``, and
                 :meth:`~phenocoder.Phenocoder.spatialgraph_map_query` then drops them from
                 the query too. Defaults to None (keep all).
+
+                The threshold is compared against raw variance, so it is not comparable
+                across statistics measured in different units. Median variances differ by
+                orders of magnitude between feature families -- composition proportions
+                around 0.02, centralities around 0.08, interaction z-scores around 2,
+                distances in the hundreds -- so ``min_variance=0.1`` drops essentially
+                every composition and centrality feature while leaving every distance and
+                count feature in place. Filtering after scaling is not an alternative:
+                scaling sets every non-constant feature to variance 1, so the threshold
+                would carry no information.
             target (str, optional): Which statistics table to embed. ``'adata'`` (the
                 default) embeds ``self.adata``, ``'subunits'`` embeds
                 ``self.adata_subunits`` and ``'subunits_agg'`` embeds
@@ -1630,7 +1640,6 @@ class Phenocoder:
                 self._spatialgraph_embedding_impl(
                     n_dim=n_dim,
                     scale=scale,
-                    variable_features=variable_features,
                     batch_correction=batch_correction,
                     batch_key=batch_key,
                     confounder_key=confounder_key,
@@ -1649,7 +1658,6 @@ class Phenocoder:
         self._spatialgraph_embedding_impl(
             n_dim=n_dim,
             scale=scale,
-            variable_features=variable_features,
             batch_correction=batch_correction,
             batch_key=batch_key,
             confounder_key=confounder_key,
@@ -1665,7 +1673,6 @@ class Phenocoder:
         self,
         n_dim: int,
         scale: bool,
-        variable_features: bool,
         batch_correction: bool,
         batch_key: str | None,
         confounder_key: str | None,
@@ -1692,12 +1699,6 @@ class Phenocoder:
                 'save_transform=True is incompatible with batch_correction=True: '
                 'bbknn.ridge_regression has no transform-only form, so the fitted space '
                 'could not be applied to a query.'
-            )
-        if save_transform and variable_features:
-            # sc.pp.highly_variable_genes sets a mask scanpy's PCA consumes; the sklearn
-            # path below would silently ignore it and fit on all features.
-            raise ValueError(
-                'save_transform=True does not support variable_features=True.'
             )
         if save_transform and self.stats_config is None:
             raise ValueError(
@@ -1771,6 +1772,11 @@ class Phenocoder:
                 self.adata.X = scaler.fit_transform(self.adata.X)
             else:
                 sc.pp.scale(self.adata)
+            # NaNs here come from NaNs already in the statistics, not from constant
+            # features -- both scalers map a constant feature to 0, having set its
+            # divisor to 1. A single NaN input is worth zeroing because sc.pp.scale
+            # spreads it: one NaN value makes that feature's mean and sd NaN, so the
+            # whole column comes back NaN (sklearn leaves just the one entry).
             self.adata.X[np.isnan(self.adata.X)] = 0
 
         # Handle batch correction metadata
@@ -1841,10 +1847,6 @@ class Phenocoder:
                 confounder_key=confounder_key if confounder_key else [],
             )
 
-        # Select highly variable features if requested
-        if variable_features:
-            sc.pp.highly_variable_genes(self.adata)
-
         # Check and adjust n_dim if necessary
         max_dim = self.adata.obs.shape[0] - 1
         if n_dim > max_dim:
@@ -1854,8 +1856,11 @@ class Phenocoder:
             )
             n_dim = max_dim
 
-        # Compute PCA. ``mask_var`` replaces the deprecated ``use_highly_variable``
-        # argument: "highly_variable" restricts PCA to HVGs, None uses all features.
+        # Compute PCA on every feature. Scanpy's highly_variable_genes is deliberately
+        # not offered here: its dispersion is variance/mean, which is undefined for the
+        # signed interaction z-scores among these features, and its mean-binning makes
+        # the selection depend on each statistic's units. Restrict features with
+        # ``min_variance``, or by the experimental design, before calling this.
         pca_model = None
         if save_transform:
             # sklearn's PCA reproduces sc.pp.pca to ~1e-6 on the same matrix, and unlike
@@ -1864,11 +1869,7 @@ class Phenocoder:
             pca_model = PCA(n_components=n_dim, svd_solver='arpack', random_state=0)
             self.adata.obsm['X_pca'] = pca_model.fit_transform(self.adata.X)
         else:
-            sc.pp.pca(
-                self.adata,
-                n_comps=n_dim,
-                mask_var='highly_variable' if variable_features else None,
-            )
+            sc.pp.pca(self.adata, n_comps=n_dim)
 
         if batch_correction:
             bbknn.bbknn(

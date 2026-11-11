@@ -99,7 +99,6 @@ def test_workflow():
     pheno.spatialgraph_embedding(
         n_dim=32,
         scale=True,
-        variable_features=True,
         batch_correction=False,
         n_neighbors=min(15, n_subunits - 1),  # Ensure n_neighbors < n_subunits
         umap=True,
