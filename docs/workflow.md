@@ -367,8 +367,14 @@ the `percentiles` argument); columns are named `desc:<descriptor>_<feature>`.
 Two things worth setting deliberately:
 
 - **`min_variance`.** Aggregating thousands of subunit features over a handful of samples
-  leaves many constant columns, and scaling divides by their near-zero standard
-  deviation. Dropping them keeps the PCA on features that actually vary.
+  leaves many constant and near-constant columns. `min_variance=0.0` drops only the
+  exactly-constant ones; a small positive value such as `1e-8` also catches the
+  near-constant ones, which matter most when the space is saved as a reference — a
+  feature whose reference standard deviation is 1e-4 turns a raw query difference of
+  0.01 into 92 standard deviations and then dominates the projection. Treat it as a
+  numerical guard, not a feature-selection knob: the threshold applies to raw variance,
+  so it is not comparable across statistics in different units (composition proportions
+  vary around 0.02, distances in the hundreds).
 - **Sparse samples are refused, not fudged.** `sd` needs at least 2 subunits, `skew` 3 and
   `kurt` 4; below that the descriptor is undefined. Such samples are skipped with a
   warning rather than zero-filled, since a reported spread of 0 is indistinguishable from
