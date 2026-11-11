@@ -48,6 +48,9 @@ class SpatialGraphAnalyzer:
         stats (set[str]): Stat groups to compute (subset of VALID_STATS); defaults to all.
         chull_min_nds (int): Minimum nodes per connected component for convex-hull stats.
         chull_min_degree (int): Minimum node degree before extracting convex-hull components.
+        interaction_percentiles (tuple[float, ...]): Percentiles (0-100) of the per-node
+            neighbor distributions reported by the ``interactions`` group; empty for
+            mean and sd only.
         results (dict): Per-radius statistics, populated after run() is called.
         results_global (pd.DataFrame | None): Statistics that do not depend on a radius
             (cluster composition), populated after run() is called.
@@ -85,6 +88,7 @@ class SpatialGraphAnalyzer:
         stats: list[str] | None = None,
         chull_min_nds: int = 10,
         chull_min_degree: int = 3,
+        interaction_percentiles: tuple[float, ...] = (),
     ):
         self.adata = adata
         self.cluster_key = cluster_key
@@ -93,6 +97,14 @@ class SpatialGraphAnalyzer:
         self.index = index
         self.chull_min_nds = chull_min_nds
         self.chull_min_degree = chull_min_degree
+        bad_percentiles = [q for q in interaction_percentiles if not 0.0 <= q <= 100.0]
+        if bad_percentiles:
+            raise ValueError(
+                f'interaction_percentiles must lie in [0, 100]; got {bad_percentiles}. '
+                f'Note these are on a 0-100 scale, unlike the [0, 1] percentiles of '
+                f'Phenocoder.aggregate_subunits.'
+            )
+        self.interaction_percentiles = tuple(interaction_percentiles)
         if stats is None:
             self.stats = set(self.VALID_STATS)
         else:
@@ -199,11 +211,39 @@ class SpatialGraphAnalyzer:
         Calculate interaction matrices between clusters.
 
         Computes both normalized and raw cluster-cluster interaction counts on
-        ``self.adata`` (requires spatial neighbors to have been computed).
+        ``self.adata`` (requires spatial neighbors to have been computed), plus summary
+        statistics of the underlying per-node distributions.
+
+        squidpy's interaction matrix sums edges over the whole graph, so it is exactly the
+        sum over the per-node neighbor counts: ``interaction_{a}_{b}`` equals
+        ``interaction_mean_{a}_{b}`` times the number of ``a`` cells. That sum cannot tell
+        apart two samples with the same pair total and different arrangement -- every ``a``
+        cell having one ``b`` neighbor, against a few ``a`` cells carrying all the ``b``
+        contacts. The per-node statistics describe the spread the sum discards, measured
+        over the cells of the source cluster.
+
+        Two normalizations are reported per statistic. The plain ones summarize each cell's
+        neighbor *counts*, which scale with local degree; the ``frac`` ones summarize each
+        cell's neighbor *fractions*, which lie in [0, 1] and so describe composition
+        independent of density. These are different units, which matters downstream:
+        ``spatialgraph_embedding(min_variance=...)`` compares raw variance and is not
+        comparable across feature families.
+
+        A cluster with no cells in this sample scores 0 for every statistic, so the feature
+        set follows the full label set rather than whichever labels are present here. Note
+        that a cluster which *is* present but has no neighbors within the radius also scores
+        0, so 0 alone does not distinguish the two; ``count_{cluster}`` from the ``counts``
+        group does, when that group is requested. A cell with no neighbors at all
+        contributes 0 to every fraction (the graph-wide no-edge case is rejected earlier, in
+        get_spatial_stats, but individual isolated cells reach here).
 
         Returns:
-            pd.DataFrame: DataFrame containing normalized and raw interaction counts, one row indexed
-                by self.index.
+            pd.DataFrame: One row indexed by self.index, with columns
+                ``interaction_{from}_{to}`` and ``interaction_norm_{from}_{to}`` (graph-wide
+                sums), and ``interaction_{stat}_{from}_{to}`` plus
+                ``interaction_frac_{stat}_{from}_{to}`` for ``stat`` in ``mean``, ``sd`` and
+                ``p{q}`` for each q in ``self.interaction_percentiles``. ``from`` is the
+                cluster whose cells are summarized, ``to`` the neighbor cluster counted.
         """
 
         # interaction matrix
@@ -258,8 +298,83 @@ class SpatialGraphAnalyzer:
             df_interaction = df_interaction.reset_index(drop=True)
             df_interaction.index = [self.index]
             results.append(df_interaction)
-        df_interaction = pd.concat(results, axis=1)
-        return df_interaction
+        results.append(self._get_interaction_distributions())
+        return pd.concat(results, axis=1)
+
+    def _get_interaction_distributions(self) -> pd.DataFrame:
+        """
+        Summarize the per-node neighbor distributions behind the interaction matrix.
+
+        For every cell, count its neighbors of each cluster, then describe that
+        distribution across the cells of each source cluster. See :meth:`get_interactions`,
+        which calls this, for the column naming and the interpretation.
+
+        Returns:
+            pd.DataFrame: One row indexed by self.index.
+        """
+        cluster_names = pd.Categorical(
+            self.adata.obs[self.cluster_key].cat.categories
+        ).tolist()
+        # get_dummies emits a column per *declared* category only for a Categorical column
+        # (an object column gives only the observed ones), which is what keeps the feature
+        # set keyed to the label set; spatialgraph_stats coerces the column for this reason.
+        # Reindex on the categories anyway so the column order is pinned rather than assumed.
+        dummies = pd.get_dummies(self.adata.obs[self.cluster_key])
+        dummies = dummies.reindex(columns=cluster_names, fill_value=False)
+        dummies = dummies.to_numpy(dtype=float)
+
+        # Summing the rows of `counts` by source cluster reproduces squidpy's interaction
+        # matrix exactly, so these statistics refine that one rather than measuring
+        # something else.
+        counts = np.asarray(
+            self.adata.obsp['spatial_connectivities'].astype(float) @ dummies
+        )
+        degree = counts.sum(axis=1)
+        # An isolated cell would give 0/0. It contributes 0 to every fraction, matching how
+        # absence is encoded throughout this class.
+        fractions = np.divide(
+            counts,
+            degree[:, None],
+            out=np.zeros_like(counts),
+            where=degree[:, None] > 0,
+        )
+
+        labels = self.adata.obs[self.cluster_key].to_numpy()
+        # Built column by column rather than via stack/pivot_table: pivoting drops all-NaN
+        # rows, which is how absent clusters silently vanished from the feature set before
+        # (see the comments in get_connectivity and in get_interactions above).
+        row: dict[str, float] = {}
+        for prefix, values in (
+            ('interaction', counts),
+            ('interaction_frac', fractions),
+        ):
+            for source in cluster_names:
+                source_values = values[labels == source]
+                if source_values.shape[0] == 0:
+                    summaries = [
+                        ('mean', np.zeros(len(cluster_names))),
+                        ('sd', np.zeros(len(cluster_names))),
+                    ]
+                    summaries += [
+                        (f'p{q:g}', np.zeros(len(cluster_names)))
+                        for q in self.interaction_percentiles
+                    ]
+                else:
+                    # ddof=0, as in get_connectivity: a single-cell cluster gives sd 0
+                    # rather than NaN.
+                    summaries = [
+                        ('mean', source_values.mean(axis=0)),
+                        ('sd', source_values.std(axis=0)),
+                    ]
+                    summaries += [
+                        (f'p{q:g}', np.percentile(source_values, q, axis=0))
+                        for q in self.interaction_percentiles
+                    ]
+                for stat, per_target in summaries:
+                    for target, value in zip(cluster_names, per_target, strict=True):
+                        row[f'{prefix}_{stat}_{source}_{target}'] = float(value)
+
+        return pd.DataFrame(row, index=[self.index])
 
     def get_moran(self) -> pd.DataFrame:
         """

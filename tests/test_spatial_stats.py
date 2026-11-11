@@ -242,6 +242,82 @@ def test_spatial_stats_invalid_stat():
         )
 
 
+def test_interaction_mean_recovers_the_graph_wide_sum():
+    """The per-node mean times the source cluster's size is the graph-wide pair count.
+
+    squidpy's interaction matrix is the sum over the per-node neighbor counts, so this is
+    the invariant the per-node statistics are built on. It also pins the from/to
+    orientation: a transposed assembly would still produce a full set of plausible-looking
+    columns, and only an asymmetric pair count catches it.
+    """
+    adata = _clustered_adata()
+    sga = SpatialGraphAnalyzer(
+        adata,
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25,),
+        index='5',
+        stats=['interactions', 'counts'],
+    )
+    sga.run()
+    row = sga.to_df().iloc[0]
+
+    clusters = adata.obs['leiden'].cat.categories.tolist()
+    for source in clusters:
+        n_source = row[f'stat:counts_count_{source}']
+        for target in clusters:
+            prefix = 'radius:25_stat:interactions_interaction'
+            mean = row[f'{prefix}_mean_{source}_{target}']
+            total = row[f'{prefix}_{source}_{target}']
+            assert mean * n_source == pytest.approx(total, abs=1e-6)
+
+
+def test_interaction_percentiles_add_requested_columns():
+    """Percentiles are opt-in, and each requested one adds a full pair matrix."""
+    adata = _clustered_adata()
+    clusters = adata.obs['leiden'].cat.categories.tolist()
+
+    def _columns(percentiles):
+        sga = SpatialGraphAnalyzer(
+            adata,
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='5',
+            stats=['interactions'],
+            interaction_percentiles=percentiles,
+        )
+        sga.run()
+        return sga.to_df().columns.tolist()
+
+    default = _columns(())
+    assert not [name for name in default if '_p10_' in name or '_p50_' in name]
+
+    with_percentiles = _columns((10, 50))
+    added = set(with_percentiles) - set(default)
+    # one column per pair, for each percentile, on both counts and fractions
+    assert len(added) == len(clusters) ** 2 * 2 * 2
+    for source in clusters:
+        for target in clusters:
+            prefix = 'radius:25_stat:interactions_interaction'
+            assert f'{prefix}_p10_{source}_{target}' in added
+            assert f'{prefix}_frac_p50_{source}_{target}' in added
+
+
+def test_spatial_stats_invalid_interaction_percentile():
+    """A percentile outside [0, 100] raises, naming the 0-100 scale."""
+    adata = _clustered_adata()
+    with pytest.raises(ValueError, match=r'interaction_percentiles must lie'):
+        SpatialGraphAnalyzer(
+            adata,
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='5',
+            interaction_percentiles=(10, 101),
+        )
+
+
 if __name__ == '__main__':
     test_spatial_stats_all()
     test_spatial_stats_subset()

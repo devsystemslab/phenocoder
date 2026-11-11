@@ -429,3 +429,13 @@ pheno.spatialgraph_stats(
     stats=["interactions", "connectivity"],  # only these groups
 )
 ```
+
+The `interactions` group reports cluster-cluster contacts two ways. The
+`interaction_{a}_{b}` columns sum over the whole graph, which cannot distinguish every `a`
+cell having one `b` neighbor from a few `a` cells carrying all the `b` contacts. The
+`interaction_mean_*` and `interaction_sd_*` columns describe the per-cell distribution
+behind that sum, as counts and (with a `frac` prefix) as each cell's neighbor fractions.
+Pass `interaction_percentiles=(10, 50, 90)` — on a 0-100 scale, unlike the `[0, 1]`
+percentiles of `aggregate_subunits` — to add percentiles of the same distributions. Each
+one adds `n_clusters ** 2 * 2` columns per radius, so they are off by default, and the
+value is recorded in `stats_config`: a reference and its queries must use the same one.

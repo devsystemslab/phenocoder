@@ -229,6 +229,15 @@ pheno.spatialgraph_stats(
 )
 ```
 
+The `interactions` group reports cluster-cluster contacts two ways. The
+`interaction_{a}_{b}` columns sum over the whole graph, which cannot distinguish every `a`
+cell having one `b` neighbor from a few `a` cells carrying all the `b` contacts. The
+`interaction_mean_*` and `interaction_sd_*` columns describe the per-cell distribution
+behind that sum, as counts and (with a `frac` prefix) as each cell's neighbor fractions.
+Pass `interaction_percentiles=(10, 50, 90)` — on a 0-100 scale — to add percentiles of the
+same distributions; each one adds `n_clusters ** 2 * 2` columns per radius, so they are off
+by default.
+
 ## Model Architecture
 
 ### CVAE (Convolutional Variational Autoencoder)

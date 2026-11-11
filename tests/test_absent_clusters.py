@@ -89,12 +89,14 @@ def test_interactions_keeps_pairs_between_two_absent_clusters():
     categories = ['A', 'B', 'C', 'D']
     row = _features(_adata(['A', 'B'], categories), stats=['interactions']).iloc[0]
 
-    # all 4 variants: raw and normalized, in both directions
+    # 4 graph-wide variants (raw and normalized, in both directions), plus mean and sd of
+    # the per-node distributions on both counts and fractions, again in both directions.
     pairs = [name for name in row.index if '_C_D' in name or '_D_C' in name]
-    assert len(pairs) == 4, f'expected 4 C/D pair columns, got {pairs}'
+    assert len(pairs) == 12, f'expected 12 C/D pair columns, got {pairs}'
     assert all(row[name] == 0.0 for name in pairs)
-    # and the full matrix is there: 2 normalizations x 4 x 4 pairs
-    assert len(row) == 32
+    # and the full matrix is there, for each of 4 x 4 pairs: 2 graph-wide normalizations,
+    # plus mean and sd on each of counts and fractions.
+    assert len(row) == 16 * (2 + 4)
 
 
 def test_moran_cluster_column_order_is_deterministic():
