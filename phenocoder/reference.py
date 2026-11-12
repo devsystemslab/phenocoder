@@ -118,7 +118,7 @@ def save_transform(
     scale: bool,
     min_clusters: int = 2,
     aggregation: dict | None = None,
-    interaction_percentiles: list[float] | None = None,
+    percentiles: list[float] | None = None,
 ) -> Path:
     """
     Persist a fitted embedding space.
@@ -140,8 +140,8 @@ def save_transform(
         aggregation (dict | None, optional): ``aggregate_subunits``' descriptor
             configuration when the reference was built from aggregated subunits, else
             None. Defaults to None.
-        interaction_percentiles (list[float] | None, optional): ``spatialgraph_stats``'
-            per-node interaction percentiles. Defaults to None (none requested).
+        percentiles (list[float] | None, optional): ``spatialgraph_stats``' percentiles
+            of the per-node distributions. Defaults to None (none requested).
 
     Returns:
         Path: The file written.
@@ -163,7 +163,7 @@ def save_transform(
         'scale': scale,
         'min_clusters': min_clusters,
         'aggregation': dict(aggregation) if aggregation is not None else None,
-        'interaction_percentiles': list(interaction_percentiles or []),
+        'percentiles': list(percentiles or []),
     }
     joblib.dump(transform, path)
     return path
@@ -202,7 +202,7 @@ def check_stats_config(
     cluster_categories: list[str] | None = None,
     min_clusters: int | None = None,
     aggregation: dict | None = None,
-    interaction_percentiles: list[float] | None = None,
+    percentiles: list[float] | None = None,
 ) -> None:
     """
     Verify the query's statistics were computed the same way as the reference's.
@@ -227,8 +227,8 @@ def check_stats_config(
             ``align_features`` would otherwise zero-fill a descriptor the reference has
             and the query lacks, letting a genuine mismatch pass silently. Defaults to
             None.
-        interaction_percentiles (list[float] | None, optional): Query's per-node
-            interaction percentiles, or None to skip. Checked for the same reason as the
+        percentiles (list[float] | None, optional): Query's percentiles of the per-node
+            distributions, or None to skip. Checked for the same reason as the
             aggregation percentiles: the percentile is part of the column name, so a
             mismatch would be zero-filled rather than detected. A transform saved before
             the option existed counts as none requested. Defaults to None.
@@ -273,13 +273,13 @@ def check_stats_config(
             f'{transform.get("min_clusters", 2)}: one-cluster samples were encoded on one '
             f'side only.'
         )
-    if interaction_percentiles is not None:
+    if percentiles is not None:
         # A transform saved before the option existed has no key, which means no
         # percentiles were requested -- the same as an explicit empty list.
-        ref_pct = list(transform.get('interaction_percentiles') or [])
-        if list(interaction_percentiles) != ref_pct:
+        ref_pct = list(transform.get('percentiles') or [])
+        if list(percentiles) != ref_pct:
             raise ValueError(
-                f'Query used interaction_percentiles={list(interaction_percentiles)} but '
+                f'Query used percentiles={list(percentiles)} but '
                 f'the reference was built with {ref_pct}. The percentile is part of the '
                 f'column name, so a mismatch would be zero-filled rather than detected.'
             )

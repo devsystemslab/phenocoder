@@ -846,7 +846,7 @@ class Phenocoder:
         stats: list[str] | None = None,
         chull_min_nds: int = 10,
         chull_min_degree: int = 3,
-        interaction_percentiles: tuple[float, ...] = (),
+        percentiles: tuple[float, ...] = (25, 50, 75),
         use_subunits: bool = False,
         dim_subunit: tuple[int, int, int] = (500, 500, 100),
         min_obs_per_subunit: int = 100,
@@ -874,21 +874,25 @@ class Phenocoder:
                 uses self.table_key. Defaults to None.
             stats (list[str] | None, optional): Which stat groups to compute. Valid options:
                 'interactions', 'centrality', 'connectivity', 'moran_features',
-                'moran_clusters', 'chull', 'counts'. If None, all groups are computed.
-                Defaults to None. Note 'counts' (cluster composition) is radius-independent,
-                so its columns carry no ``radius:`` prefix.
+                'moran_clusters', 'distribution_interactions', 'distribution_features',
+                'chull', 'counts'. If None, all groups are computed. Defaults to None. The
+                two 'distribution_' groups describe the per-node distributions behind the
+                graph-wide statistics, and can be dropped independently of them. Note
+                'counts' (cluster composition) and the raw-value half of
+                'distribution_features' are radius-independent, so those columns carry no
+                ``radius:`` prefix.
             chull_min_nds (int, optional): Minimum number of nodes per connected component for
                 convex-hull statistics. Only used if 'chull' is in stats. Defaults to 10.
             chull_min_degree (int, optional): Minimum node degree before extracting convex-hull
                 connected components. Only used if 'chull' is in stats. Defaults to 3.
-            interaction_percentiles (tuple[float, ...], optional): Percentiles of the
-                per-node neighbor distributions to report in the 'interactions' group, on a
-                0-100 scale (note ``aggregate_subunits`` takes its own percentiles in
-                [0, 1]). The group always reports the mean and sd of those distributions;
-                each percentile adds a further ``n_clusters ** 2 * 2`` columns per radius,
-                so deciles at 15 clusters add 4050. Only used if 'interactions' is in
-                stats. Recorded in ``stats_config``; a reference and its queries must use
-                the same value. Defaults to () (mean and sd only).
+            percentiles (tuple[float, ...], optional): Percentiles reported by the
+                'distribution_interactions' and 'distribution_features' groups, on a 0-100
+                scale (note ``aggregate_subunits`` takes its own percentiles in [0, 1]).
+                Both groups always report the mean and sd; each percentile adds a further
+                ``n_clusters ** 2 * 2`` columns per radius to 'distribution_interactions'
+                and ``n_vars`` to each half of 'distribution_features'. Pass () for mean
+                and sd only. Recorded in ``stats_config``; a reference and its queries must
+                use the same value. Defaults to (25, 50, 75).
             use_subunits (bool, optional): Whether to partition samples into spatial
                 subunits and compute statistics per subunit instead of per sample.
                 Defaults to False.
@@ -1115,7 +1119,7 @@ class Phenocoder:
                         stats=stats,
                         chull_min_nds=chull_min_nds,
                         chull_min_degree=chull_min_degree,
-                        interaction_percentiles=interaction_percentiles,
+                        percentiles=percentiles,
                     )
                     sga.run()
                     df_subunit = sga.to_df()
@@ -1208,7 +1212,7 @@ class Phenocoder:
                         stats=stats,
                         chull_min_nds=chull_min_nds,
                         chull_min_degree=chull_min_degree,
-                        interaction_percentiles=interaction_percentiles,
+                        percentiles=percentiles,
                     )
                     sga.run()
                     df_sample = sga.to_df()
@@ -1249,7 +1253,7 @@ class Phenocoder:
             'stats': list(stats) if stats is not None else None,
             'cluster_categories': cluster_categories,
             'min_clusters': min_clusters,
-            'interaction_percentiles': list(interaction_percentiles),
+            'percentiles': list(percentiles),
         }
 
     # Which attribute each public target name refers to, and the call that fills it.
@@ -1922,9 +1926,7 @@ class Phenocoder:
                 scale=scale,
                 min_clusters=self.stats_config.get('min_clusters', 2),
                 aggregation=self.stats_config.get('aggregation'),
-                interaction_percentiles=self.stats_config.get(
-                    'interaction_percentiles', []
-                ),
+                percentiles=self.stats_config.get('percentiles', []),
             )
             print(f'Saved embedding transform to {path}')
 
@@ -2016,9 +2018,7 @@ class Phenocoder:
                     cluster_categories=self.stats_config['cluster_categories'],
                     min_clusters=self.stats_config.get('min_clusters', 2),
                     aggregation=self.stats_config.get('aggregation'),
-                    interaction_percentiles=self.stats_config.get(
-                        'interaction_percentiles', []
-                    ),
+                    percentiles=self.stats_config.get('percentiles', []),
                 )
 
         df = adata.to_df()

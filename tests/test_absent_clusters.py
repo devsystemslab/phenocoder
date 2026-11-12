@@ -10,6 +10,7 @@ from phenocoder.spatial import SpatialGraphAnalyzer
 # them happens to contain no cells of some cluster.
 CLUSTER_AWARE_GROUPS = [
     'interactions',
+    'distribution_interactions',
     'centrality',
     'connectivity',
     'moran_clusters',
@@ -89,14 +90,32 @@ def test_interactions_keeps_pairs_between_two_absent_clusters():
     categories = ['A', 'B', 'C', 'D']
     row = _features(_adata(['A', 'B'], categories), stats=['interactions']).iloc[0]
 
-    # 4 graph-wide variants (raw and normalized, in both directions), plus mean and sd of
-    # the per-node distributions on both counts and fractions, again in both directions.
+    # all 4 variants: raw and normalized, in both directions
     pairs = [name for name in row.index if '_C_D' in name or '_D_C' in name]
-    assert len(pairs) == 12, f'expected 12 C/D pair columns, got {pairs}'
+    assert len(pairs) == 4, f'expected 4 C/D pair columns, got {pairs}'
     assert all(row[name] == 0.0 for name in pairs)
-    # and the full matrix is there, for each of 4 x 4 pairs: 2 graph-wide normalizations,
-    # plus mean and sd on each of counts and fractions.
-    assert len(row) == 16 * (2 + 4)
+    # and the full matrix is there: 2 normalizations x 4 x 4 pairs
+    assert len(row) == 32
+
+
+def test_interaction_distributions_keep_pairs_between_two_absent_clusters():
+    """The distribution group covers mutually-absent pairs too, at 0.
+
+    Same guarantee as for the graph-wide matrix above, but it comes from a different
+    mechanism: there squidpy emits an all-NaN row that must be kept, here the source
+    cluster simply has no cells to summarize and is filled explicitly.
+    """
+    categories = ['A', 'B', 'C', 'D']
+    row = _features(
+        _adata(['A', 'B'], categories), stats=['distribution_interactions']
+    ).iloc[0]
+
+    # per ordered pair: mean, sd and the three default quartiles, on counts and fractions
+    per_pair = 2 * (2 + 3)
+    pairs = [name for name in row.index if '_C_D' in name or '_D_C' in name]
+    assert len(pairs) == 2 * per_pair, f'expected C/D pair columns, got {pairs}'
+    assert all(row[name] == 0.0 for name in pairs)
+    assert len(row) == 16 * per_pair
 
 
 def test_moran_cluster_column_order_is_deterministic():
@@ -213,7 +232,7 @@ def test_isolated_cluster_is_not_distinguishable_from_an_absent_one():
 
     assert sga.results[25]['connectivity'].iloc[0]['degree_C_mean'] == 0.0
     # identical to the absent case above -- only the count tells them apart
-    assert sga.results_global.iloc[0]['count_C'] == 1
+    assert sga.results_global['counts'].iloc[0]['count_C'] == 1
 
 
 # --- one-cluster samples (spatialgraph_stats(min_clusters=1)) -------------------------

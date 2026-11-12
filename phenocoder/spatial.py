@@ -7,7 +7,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import squidpy as sq
-from scipy.sparse import csr_array, diags_array, issparse
+from scipy.sparse import csr_array, diags_array, eye_array, issparse
 from scipy.spatial import ConvexHull, QhullError
 from sklearn.neighbors import radius_neighbors_graph
 
@@ -48,12 +48,13 @@ class SpatialGraphAnalyzer:
         stats (set[str]): Stat groups to compute (subset of VALID_STATS); defaults to all.
         chull_min_nds (int): Minimum nodes per connected component for convex-hull stats.
         chull_min_degree (int): Minimum node degree before extracting convex-hull components.
-        interaction_percentiles (tuple[float, ...]): Percentiles (0-100) of the per-node
-            neighbor distributions reported by the ``interactions`` group; empty for
-            mean and sd only.
+        percentiles (tuple[float, ...]): Percentiles (0-100) reported by the
+            ``distribution_interactions`` and ``distribution_features`` groups, alongside
+            the mean and sd those groups always report. Empty for mean and sd only.
         results (dict): Per-radius statistics, populated after run() is called.
-        results_global (pd.DataFrame | None): Statistics that do not depend on a radius
-            (cluster composition), populated after run() is called.
+        results_global (dict[str, pd.DataFrame]): Statistics that do not depend on a
+            radius (cluster composition, raw feature descriptors), keyed by stat group
+            and populated after run() is called.
 
     Example:
         >>> analyzer = SpatialGraphAnalyzer(
@@ -74,6 +75,8 @@ class SpatialGraphAnalyzer:
         'connectivity',
         'moran_features',
         'moran_clusters',
+        'distribution_interactions',
+        'distribution_features',
         'chull',
         'counts',
     )
@@ -88,7 +91,7 @@ class SpatialGraphAnalyzer:
         stats: list[str] | None = None,
         chull_min_nds: int = 10,
         chull_min_degree: int = 3,
-        interaction_percentiles: tuple[float, ...] = (),
+        percentiles: tuple[float, ...] = (25, 50, 75),
     ):
         self.adata = adata
         self.cluster_key = cluster_key
@@ -97,14 +100,14 @@ class SpatialGraphAnalyzer:
         self.index = index
         self.chull_min_nds = chull_min_nds
         self.chull_min_degree = chull_min_degree
-        bad_percentiles = [q for q in interaction_percentiles if not 0.0 <= q <= 100.0]
+        bad_percentiles = [q for q in percentiles if not 0.0 <= q <= 100.0]
         if bad_percentiles:
             raise ValueError(
-                f'interaction_percentiles must lie in [0, 100]; got {bad_percentiles}. '
+                f'percentiles must lie in [0, 100]; got {bad_percentiles}. '
                 f'Note these are on a 0-100 scale, unlike the [0, 1] percentiles of '
                 f'Phenocoder.aggregate_subunits.'
             )
-        self.interaction_percentiles = tuple(interaction_percentiles)
+        self.percentiles = tuple(percentiles)
         if stats is None:
             self.stats = set(self.VALID_STATS)
         else:
@@ -117,7 +120,7 @@ class SpatialGraphAnalyzer:
             self.stats = set(stats)
         # Populated by run(): per-radius results, and results for radius-independent groups.
         self.results: dict = {}
-        self.results_global: pd.DataFrame | None = None
+        self.results_global: dict[str, pd.DataFrame] = {}
 
     def get_chulls_connected_components(
         self, clusters: list, radius: int = 100, min_nds: int = 10, min_degree: int = 4
@@ -211,39 +214,20 @@ class SpatialGraphAnalyzer:
         Calculate interaction matrices between clusters.
 
         Computes both normalized and raw cluster-cluster interaction counts on
-        ``self.adata`` (requires spatial neighbors to have been computed), plus summary
-        statistics of the underlying per-node distributions.
+        ``self.adata`` (requires spatial neighbors to have been computed).
 
-        squidpy's interaction matrix sums edges over the whole graph, so it is exactly the
-        sum over the per-node neighbor counts: ``interaction_{a}_{b}`` equals
-        ``interaction_mean_{a}_{b}`` times the number of ``a`` cells. That sum cannot tell
+        squidpy's interaction matrix sums edges over the whole graph, so it cannot tell
         apart two samples with the same pair total and different arrangement -- every ``a``
         cell having one ``b`` neighbor, against a few ``a`` cells carrying all the ``b``
-        contacts. The per-node statistics describe the spread the sum discards, measured
-        over the cells of the source cluster.
+        contacts. The ``distribution_interactions`` group describes the per-node
+        distribution behind this sum; see :meth:`get_interaction_distributions`.
 
-        Two normalizations are reported per statistic. The plain ones summarize each cell's
-        neighbor *counts*, which scale with local degree; the ``frac`` ones summarize each
-        cell's neighbor *fractions*, which lie in [0, 1] and so describe composition
-        independent of density. These are different units, which matters downstream:
-        ``spatialgraph_embedding(min_variance=...)`` compares raw variance and is not
-        comparable across feature families.
-
-        A cluster with no cells in this sample scores 0 for every statistic, so the feature
-        set follows the full label set rather than whichever labels are present here. Note
-        that a cluster which *is* present but has no neighbors within the radius also scores
-        0, so 0 alone does not distinguish the two; ``count_{cluster}`` from the ``counts``
-        group does, when that group is requested. A cell with no neighbors at all
-        contributes 0 to every fraction (the graph-wide no-edge case is rejected earlier, in
-        get_spatial_stats, but individual isolated cells reach here).
+        A cluster with no cells in this sample scores 0, so the feature set follows the
+        full label set rather than whichever labels are present here.
 
         Returns:
             pd.DataFrame: One row indexed by self.index, with columns
-                ``interaction_{from}_{to}`` and ``interaction_norm_{from}_{to}`` (graph-wide
-                sums), and ``interaction_{stat}_{from}_{to}`` plus
-                ``interaction_frac_{stat}_{from}_{to}`` for ``stat`` in ``mean``, ``sd`` and
-                ``p{q}`` for each q in ``self.interaction_percentiles``. ``from`` is the
-                cluster whose cells are summarized, ``to`` the neighbor cluster counted.
+                ``interaction_{from}_{to}`` and ``interaction_norm_{from}_{to}``.
         """
 
         # interaction matrix
@@ -298,19 +282,40 @@ class SpatialGraphAnalyzer:
             df_interaction = df_interaction.reset_index(drop=True)
             df_interaction.index = [self.index]
             results.append(df_interaction)
-        results.append(self._get_interaction_distributions())
         return pd.concat(results, axis=1)
 
-    def _get_interaction_distributions(self) -> pd.DataFrame:
+    def get_interaction_distributions(self) -> pd.DataFrame:
         """
         Summarize the per-node neighbor distributions behind the interaction matrix.
 
         For every cell, count its neighbors of each cluster, then describe that
-        distribution across the cells of each source cluster. See :meth:`get_interactions`,
-        which calls this, for the column naming and the interpretation.
+        distribution across the cells of each source cluster. ``interactions`` reports the
+        graph-wide sum over exactly these per-node values: ``interaction_{a}_{b}`` from
+        that group equals ``mean_{a}_{b}`` here times the number of ``a`` cells. The sum
+        alone cannot separate every ``a`` cell having one ``b`` neighbor from a few ``a``
+        cells carrying all the ``b`` contacts; the spread here can.
+
+        Two normalizations are reported per statistic. The plain ones summarize each cell's
+        neighbor *counts*, which scale with local degree; the ``frac`` ones summarize each
+        cell's neighbor *fractions*, which lie in [0, 1] and so describe composition
+        independent of density. These are different units, which matters downstream:
+        ``spatialgraph_embedding(min_variance=...)`` compares raw variance and is not
+        comparable across feature families.
+
+        A cluster with no cells in this sample scores 0 for every statistic, so the feature
+        set follows the full label set rather than whichever labels are present here. Note
+        that a cluster which *is* present but has no neighbors within the radius also scores
+        0, so 0 alone does not distinguish the two; ``count_{cluster}`` from the ``counts``
+        group does, when that group is requested. A cell with no neighbors at all
+        contributes 0 to every fraction (the graph-wide no-edge case is rejected earlier, in
+        get_spatial_stats, but individual isolated cells reach here).
 
         Returns:
-            pd.DataFrame: One row indexed by self.index.
+            pd.DataFrame: One row indexed by self.index, with columns
+                ``{stat}_{from}_{to}`` and ``frac_{stat}_{from}_{to}`` for ``stat`` in
+                ``mean``, ``sd`` and ``p{q}`` for each q in ``self.percentiles``. ``from``
+                is the cluster whose cells are summarized, ``to`` the neighbor cluster
+                counted.
         """
         cluster_names = pd.Categorical(
             self.adata.obs[self.cluster_key].cat.categories
@@ -344,37 +349,133 @@ class SpatialGraphAnalyzer:
         # rows, which is how absent clusters silently vanished from the feature set before
         # (see the comments in get_connectivity and in get_interactions above).
         row: dict[str, float] = {}
-        for prefix, values in (
-            ('interaction', counts),
-            ('interaction_frac', fractions),
-        ):
+        # No 'interaction' prefix on these: the stat group's own name already carries it,
+        # so to_df() would otherwise emit stat:distribution_interactions_interaction_mean_*.
+        for prefix, values in (('', counts), ('frac_', fractions)):
             for source in cluster_names:
                 source_values = values[labels == source]
-                if source_values.shape[0] == 0:
-                    summaries = [
-                        ('mean', np.zeros(len(cluster_names))),
-                        ('sd', np.zeros(len(cluster_names))),
-                    ]
-                    summaries += [
-                        (f'p{q:g}', np.zeros(len(cluster_names)))
-                        for q in self.interaction_percentiles
-                    ]
-                else:
-                    # ddof=0, as in get_connectivity: a single-cell cluster gives sd 0
-                    # rather than NaN.
-                    summaries = [
-                        ('mean', source_values.mean(axis=0)),
-                        ('sd', source_values.std(axis=0)),
-                    ]
-                    summaries += [
-                        (f'p{q:g}', np.percentile(source_values, q, axis=0))
-                        for q in self.interaction_percentiles
-                    ]
+                summaries = self._column_summaries(source_values, len(cluster_names))
                 for stat, per_target in summaries:
                     for target, value in zip(cluster_names, per_target, strict=True):
-                        row[f'{prefix}_{stat}_{source}_{target}'] = float(value)
+                        row[f'{prefix}{stat}_{source}_{target}'] = float(value)
 
         return pd.DataFrame(row, index=[self.index])
+
+    def _column_summaries(
+        self, values: np.ndarray, n_columns: int
+    ) -> list[tuple[str, np.ndarray]]:
+        """
+        Describe each column of a per-cell matrix: mean, sd and the configured percentiles.
+
+        The single definition of what this class means by "summarize a distribution", used
+        by both ``distribution_`` groups so the two cannot drift apart.
+
+        Args:
+            values (np.ndarray): ``n_cells x n_columns`` matrix of per-cell values. May
+                have no rows, in which case every summary is 0 -- the convention the
+                cluster-aware groups use for a cluster with no cells here.
+            n_columns (int): Expected number of columns, used to shape the empty case.
+
+        Returns:
+            list[tuple[str, np.ndarray]]: ``(label, per_column_values)`` pairs.
+        """
+        if values.shape[0] == 0:
+            labels = ['mean', 'sd', *(f'p{q:g}' for q in self.percentiles)]
+            return [(label, np.zeros(n_columns)) for label in labels]
+        # ddof=0, as in get_connectivity: a single-cell group gives sd 0 rather than NaN.
+        summaries = [('mean', values.mean(axis=0)), ('sd', values.std(axis=0))]
+        summaries += [
+            (f'p{q:g}', np.percentile(values, q, axis=0)) for q in self.percentiles
+        ]
+        return summaries
+
+    def _summarize_features(self, values: np.ndarray, prefix: str) -> pd.DataFrame:
+        """
+        Turn an ``n_cells x n_vars`` matrix into one row of per-feature descriptors.
+
+        Args:
+            values (np.ndarray): Per-cell values, one column per ``self.adata.var_names``.
+            prefix (str): Column-name prefix identifying the family (``feature`` or
+                ``nbhd``).
+
+        Returns:
+            pd.DataFrame: One row indexed by self.index.
+        """
+        var_names = [str(name) for name in self.adata.var_names]
+        row: dict[str, float] = {}
+        for stat, per_feature in self._column_summaries(values, len(var_names)):
+            for var, value in zip(var_names, per_feature, strict=True):
+                row[f'{prefix}_{stat}_{var}'] = float(value)
+        return pd.DataFrame(row, index=[self.index])
+
+    def get_feature_stats(self) -> pd.DataFrame:
+        """
+        Describe the distribution of each continuous feature across the sample's cells.
+
+        ``moran_features`` reduces each feature to a single Moran's I, which says how
+        spatially autocorrelated it is and nothing about its level or spread. These
+        descriptors cover that: mean, sd and the configured percentiles of
+        ``self.adata.X``, column by column.
+
+        No neighbor graph is involved, so this is radius-independent and is emitted once
+        per sample rather than per radius (see :meth:`run`). It is the continuous analogue
+        of the ``counts`` group: composition rather than spatial arrangement.
+
+        Every ``var_name`` is described, as in :meth:`get_moran` -- including any column
+        that is not a measurement, such as an instance ID carried in ``.X``.
+
+        Each feature is in its own units, so these columns are not comparable with each
+        other, nor with the ``nbhd_`` ones, under a single ``min_variance`` threshold --
+        that compares raw variance.
+
+        Returns:
+            pd.DataFrame: One row indexed by self.index, with columns
+                ``feature_{mean|sd|p{q}}_{var}``.
+        """
+        X = self.adata.X
+        X = X.toarray() if issparse(X) else np.asarray(X)
+        return self._summarize_features(X, 'feature')
+
+    def get_feature_neighborhood_stats(self) -> pd.DataFrame:
+        """
+        Describe the distribution of each feature's *neighborhood* means across cells.
+
+        For every cell, average each feature over ``{i} U N(i)``, then describe that
+        per-cell value across the sample. This is the continuous counterpart of the
+        per-node statistics behind the interaction matrix, and it carries what neither the
+        raw descriptors nor Moran's I give on their own: a spatially smooth feature keeps
+        most of its spread after neighborhood averaging, while a spatially random one
+        collapses toward the sample mean.
+
+        The neighborhood includes the cell itself, matching
+        :func:`spatial_message_passing`, which adds the identity before row-normalizing.
+        That makes every degree at least 1, so no division guard is needed and a cell with
+        no neighbors within the radius reports its own value rather than a fabricated 0 --
+        which for a feature centered near zero would be indistinguishable from a real
+        measurement.
+
+        Each feature is in its own units; see :meth:`get_feature_stats` on ``min_variance``.
+
+        Returns:
+            pd.DataFrame: One row indexed by self.index, with columns
+                ``nbhd_{mean|sd|p{q}}_{var}``.
+        """
+        X = self.adata.X
+        X = X.toarray() if issparse(X) else np.asarray(X)
+        # Self-loop, so an isolated cell averages over itself alone.
+        A = self.adata.obsp['spatial_connectivities'] + eye_array(
+            X.shape[0], format='csr'
+        )
+        # Row-normalize: row i of D_inv @ A scales node i's whole neighborhood by 1/d_i, so
+        # each value is the mean over {i} U N(i). Multiplying the other way round
+        # (A @ D_inv) scales *columns* by 1/d_j, weighting each neighbor by its own degree
+        # instead of averaging. D_inv must stay a 1-D vector: np.diag(D_inv).dot(A)
+        # dispatches to NumPy, which does not understand a sparse operand and silently
+        # returns an object-dtype array of sparse matrices. Both traps are documented at
+        # length in spatial_message_passing, which does the same thing.
+        degree = np.asarray(A.sum(axis=1)).ravel()
+        neighborhood = np.asarray(diags_array(1.0 / degree) @ (A @ X))
+        return self._summarize_features(neighborhood, 'nbhd')
 
     def get_moran(self) -> pd.DataFrame:
         """
@@ -675,6 +776,8 @@ class SpatialGraphAnalyzer:
             'connectivity': self.get_connectivity,
             'moran_features': self.get_moran,
             'moran_clusters': self.get_moran_cluster,
+            'distribution_interactions': self.get_interaction_distributions,
+            'distribution_features': self.get_feature_neighborhood_stats,
         }
         dict = {name: func() for name, func in stat_funcs.items() if name in self.stats}
 
@@ -716,8 +819,8 @@ class SpatialGraphAnalyzer:
         prefixed with ``radius:{radius}_stat:{group}_`` so every statistic is
         traceable to the radius and stat group it came from.
 
-        The ``counts`` group is radius-independent and is emitted once, prefixed only with
-        ``stat:counts_``.
+        The ``counts`` group and the raw-value half of ``distribution_features`` are
+        radius-independent and are emitted once, prefixed only with ``stat:{group}_``.
 
         Returns:
             pd.DataFrame: One row of spatial statistics for this sample/subunit.
@@ -734,12 +837,15 @@ class SpatialGraphAnalyzer:
                 ]
                 df.append(self.results[radius][result].reset_index(drop=True))
 
-        # Cluster composition does not depend on a neighborhood radius, so it is computed
-        # once and carries no radius prefix. Emitting it per radius would repeat identical
-        # values and give composition proportionally more weight in a downstream PCA.
-        if self.results_global is not None and not self.results_global.empty:
-            global_df = self.results_global.copy()
-            global_df.columns = [f'stat:counts_{col}' for col in global_df.columns]
+        # Cluster composition and the raw feature descriptors do not depend on a
+        # neighborhood radius, so they are computed once and carry no radius prefix.
+        # Emitting them per radius would repeat identical values and give them
+        # proportionally more weight in a downstream PCA.
+        for group, result in self.results_global.items():
+            if result is None or result.empty:
+                continue
+            global_df = result.copy()
+            global_df.columns = [f'stat:{group}_{col}' for col in global_df.columns]
             df.append(global_df.reset_index(drop=True))
 
         df = pd.concat(df, axis=1)
@@ -752,8 +858,9 @@ class SpatialGraphAnalyzer:
 
         Populates ``self.results`` (a dict keyed by radius) by calling
         :meth:`get_spatial_stats` for each radius in ``self.radii``, plus
-        ``self.results_global`` for stat groups that do not depend on a radius. Call
-        :meth:`to_df` afterwards to collect the results into a DataFrame.
+        ``self.results_global`` (a dict keyed by stat group) for the groups that do not
+        depend on a radius. Call :meth:`to_df` afterwards to collect the results into a
+        DataFrame.
 
         Returns:
             None
@@ -762,7 +869,13 @@ class SpatialGraphAnalyzer:
         for radius in self.radii:
             self.results[radius] = self.get_spatial_stats(radius)
         # Radius-independent groups are computed once rather than per radius.
-        self.results_global = self.get_counts() if 'counts' in self.stats else None
+        global_funcs = {
+            'counts': self.get_counts,
+            'distribution_features': self.get_feature_stats,
+        }
+        self.results_global = {
+            name: func() for name, func in global_funcs.items() if name in self.stats
+        }
 
 
 def spatial_message_passing(adata: ad.AnnData, radius: int) -> ad.AnnData:
