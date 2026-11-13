@@ -88,25 +88,25 @@ def cut_patch(
     """
     if img.ndim == 4:
         img = img[:, z, ...]
-    x_max = x + patch_size[0] // 2
-    y_max = y + patch_size[1] // 2
-    x_min = x - patch_size[0] // 2
-    y_min = y - patch_size[1] // 2
-    img = img[:, y_min:y_max, x_min:x_max]
-    assert img.shape[-2:] == patch_size
+    # patch_size is (height, width). Start half a patch before the centre and take
+    # exactly height x width pixels, so odd sizes are not one pixel short (the centre
+    # pixel is at index size // 2).
+    height, width = patch_size
+    y_min = y - height // 2
+    x_min = x - width // 2
+    img = img[:, y_min : y_min + height, x_min : x_min + width]
+    assert img.shape[-2:] == tuple(patch_size)
     if scale:
         if percentiles_high is None or percentiles_low is None:
             raise ValueError('Percentiles need to be provided for scaling')
         img = img.astype(np.float32)
         for i in range(img.shape[0]):
-            if percentiles_high[i] == percentiles_low[i]:
-                percentiles_high[i] += 1
-            img[i] = np.clip(
-                (img[i] - percentiles_low[i])
-                / (percentiles_high[i] - percentiles_low[i]),
-                0,
-                1,
-            )
+            span = percentiles_high[i] - percentiles_low[i]
+            if span == 0:
+                # a constant channel: avoid dividing by zero, without changing the
+                # stored percentiles (which the next patch would then see)
+                span = 1
+            img[i] = np.clip((img[i] - percentiles_low[i]) / span, 0, 1)
         img = img.astype(np.float32)
     if patch_transform is not None:
         # copy: unscaled, `img` is a view into the whole image, which an in-place
@@ -221,9 +221,12 @@ class PatchGenerator:
         )
         self.channels = self.sdata.images[image_key_init].coords['c'].values.tolist()
         self.image_size = self.sdata.images[image_key_init].shape[-2:]
-        self.patch_size = patch_size
+        # tuple: extract_patch compares it with an array shape
+        self.patch_size = tuple(patch_size)
         self.df_stats = pd.DataFrame()
         self.patches = None
+        # name of the dataset written by generate_dataset; encode labels patches with it
+        self.dataset = None
         self.percentiles_low = None
         self.percentiles_high = None
         # per-sample lookups {sample_id: array over channels}, built by
@@ -265,19 +268,21 @@ class PatchGenerator:
         self.patches['y'] = self.patches['y'].astype(int)
 
         # filter x and y that are within image boundaries when patch size is added
-        # (per-sample, since images may differ in size)
+        # (per-sample, since images may differ in size). patch_size is (height, width):
+        # the height bounds y, the width bounds x.
+        height, width = self.patch_size
         filtered = []
         for sample_id, grp in self.patches.groupby(self.sample_key):
             image_size = self.sdata.images[
                 '_'.join([self.image_key, str(sample_id)])
             ].shape[-2:]
             x_min, x_max = (
-                self.patch_size[0] // 2,
-                image_size[1] - (self.patch_size[0] - self.patch_size[0] // 2),
+                width // 2,
+                image_size[1] - (width - width // 2),
             )
             y_min, y_max = (
-                self.patch_size[1] // 2,
-                image_size[0] - (self.patch_size[1] - self.patch_size[1] // 2),
+                height // 2,
+                image_size[0] - (height - height // 2),
             )
             grp = grp[
                 (grp['x'] >= x_min)
@@ -322,8 +327,8 @@ class PatchGenerator:
             sample_id (str or int): Sample identifier
 
         Returns:
-            tuple: (percentiles_low, percentiles_high). Per-sample arrays are copies, since
-                ``cut_patch`` may bump the high in place when low == high.
+            tuple: (percentiles_low, percentiles_high). Per-sample arrays are copies, so
+                the stored per-sample lookups cannot be changed through them.
         """
         if self.scale and self.scale_per_sample:
             if self.sample_percentiles_low is None:
@@ -398,7 +403,10 @@ class PatchGenerator:
         mean = np.mean(imgs, axis=(-2, -1))
         std = np.std(imgs, axis=(-2, -1))
         median = np.median(imgs, axis=(-2, -1))
-        mad = np.median(np.abs(imgs - np.median(imgs)), axis=(-2, -1))
+        # each slice's deviation from its own median, not from one median over everything
+        mad = np.median(
+            np.abs(imgs - median[..., np.newaxis, np.newaxis]), axis=(-2, -1)
+        )
         max = np.max(imgs, axis=(-2, -1))
         min = np.min(imgs, axis=(-2, -1))
         percentile_low = np.percentile(imgs, percentile, axis=(-2, -1))
@@ -634,6 +642,7 @@ class PatchGenerator:
                 The files are identical to ``n_workers=1``; ``patches.csv`` is written once,
                 by this process. Defaults to 1 (no worker processes).
         """
+        self.dataset = dataset
         self.dir_dataset = Path(dir_dataset)
         self.dir_dataset.mkdir(exist_ok=True, parents=True)
         self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
@@ -798,8 +807,9 @@ class SequenceGenerator(Sequence):
         Returns:
             ndarray: Batch of loaded image patches
         """
-        # Initialization
-        X = np.empty((self.batch_size, *self.dim, self.n_channels))
+        # float32: the model computes in float32, and numpy's float64 default would double
+        # the batch memory for nothing
+        X = np.empty((self.batch_size, *self.dim, self.n_channels), dtype=np.float32)
         # Generate data
         for i, idx in enumerate(ids_temp):
             # Store sample
@@ -970,55 +980,37 @@ class DatasetLoader:
             dim (tuple): Spatial (height, width) of patches. Defaults to (128, 128).
             n_channels (int): Number of image channels. Defaults to 4.
             shuffle (bool): Whether to shuffle patch order each epoch. Defaults to True.
+            flip (bool): Whether to randomly flip training patches. Validation patches are
+                never flipped, so the validation loss is measured on the data as it is.
+                Defaults to False.
             n_workers (int): Number of worker processes for the Keras Sequence. Defaults to 1.
 
         Returns:
             tuple: ``(train_generator, val_generator, one_hot_encoder)`` if ``conditions`` is non-empty,
                 otherwise ``(train_generator, val_generator)``
         """
+        enc = None
+        cond = None
         if conditions:
             enc = OneHotEncoder()
             cond = enc.fit_transform(self.patches[conditions]).toarray()
-            generator_train = SequenceGenerator(
-                self.patches[self.patches['split'] == 'train']['file_path'].values,
-                conditions=cond[self.patches['split'] == 'train'],
+
+        def make_generator(split: str) -> SequenceGenerator:
+            in_split = (self.patches['split'] == split).to_numpy()
+            return SequenceGenerator(
+                self.patches[in_split]['file_path'].values,
+                conditions=cond[in_split] if cond is not None else None,
                 batch_size=batch_size,
                 dim=dim,
                 n_channels=n_channels,
                 shuffle=shuffle,
-                flip=flip,
-                return_conditions=True,
+                flip=flip and split == 'train',
+                return_conditions=cond is not None,
                 workers=n_workers,
             )
-            generator_val = SequenceGenerator(
-                self.patches[self.patches['split'] == 'val']['file_path'].values,
-                conditions=cond[self.patches['split'] == 'val'],
-                batch_size=batch_size,
-                dim=dim,
-                n_channels=n_channels,
-                shuffle=shuffle,
-                flip=flip,
-                return_conditions=True,
-                workers=n_workers,
-            )
+
+        generator_train = make_generator('train')
+        generator_val = make_generator('val')
+        if conditions:
             return generator_train, generator_val, enc
-        else:
-            generator_train = SequenceGenerator(
-                self.patches[self.patches['split'] == 'train']['file_path'].values,
-                batch_size=batch_size,
-                dim=dim,
-                n_channels=n_channels,
-                shuffle=shuffle,
-                return_conditions=False,
-                workers=n_workers,
-            )
-            generator_val = SequenceGenerator(
-                self.patches[self.patches['split'] == 'val']['file_path'].values,
-                batch_size=batch_size,
-                dim=dim,
-                n_channels=n_channels,
-                shuffle=shuffle,
-                return_conditions=False,
-                workers=n_workers,
-            )
-            return generator_train, generator_val
+        return generator_train, generator_val

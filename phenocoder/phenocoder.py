@@ -478,9 +478,10 @@ class Phenocoder:
             dir_datasets={ds: self.dir_dataset(ds) for ds in self.datasets},
             sample_key=self.sample_key,
         )
-        self.data_loader.load_datasets()
-        # Pass batch_size through: the split truncation and the generators must agree on it,
-        # or patches are dropped to align with 64 while batching happens at another size.
+        # set_train_val_split loads the datasets itself (patches.csv / stats.csv), so they
+        # are read once. Pass batch_size through: the split truncation and the generators
+        # must agree on it, or patches are dropped to align with 64 while batching happens
+        # at another size.
         self.data_loader.set_train_val_split(batch_size=batch_size)
 
         self.model_config = {
@@ -735,6 +736,34 @@ class Phenocoder:
                 plot_frac=plot_frac,
             )
 
+    def _sample_to_dataset(self) -> dict:
+        """
+        Map each sample to the dataset it was generated into.
+
+        Read from the saved ``patches.csv`` files, so a project with several datasets
+        labels every sample with its own rather than with one name for all of them.
+
+        Returns:
+            dict: ``{sample: dataset}`` over every sample in ``self.datasets``.
+
+        Raises:
+            ValueError: If ``.datasets`` is empty.
+        """
+        if not self.datasets:
+            raise ValueError(
+                '.datasets is empty -- encode() needs the training datasets to '
+                'recover per-sample scaling and dataset labels. Set it explicitly, '
+                'or load a model whose config.yaml records them.'
+            )
+        patches_meta = pd.concat(
+            [
+                pd.read_csv(Path(self.dir_dataset(ds), 'patches.csv'))
+                for ds in self.datasets
+            ],
+            ignore_index=True,
+        )
+        return patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
+
     def encode(
         self,
         batch_size: int = 64,
@@ -756,6 +785,9 @@ class Phenocoder:
             batch_size (int, optional): Batch size for encoding predictions. Defaults to 64.
             scale (bool, optional): Whether to intensity-scale patches before encoding. Used
                 only when the patch_generator is (re)built here. Defaults to True.
+                A patch_generator left by ``generate_dataset`` is reused with its own scaling,
+                but its patch table is rebuilt in full, so every object is encoded even after
+                ``generate_dataset(n_patches=...)``.
             spatial_key_index (str | None, optional): obsm key (integer z-index coords) used to
                 extract patches. If None, falls back to self.spatial_key. Defaults to None.
             scale_percentile (float, optional): Percentile (0-100) for per-slice low/high, used
@@ -813,6 +845,15 @@ class Phenocoder:
                     stacklevel=2,
                 )
             self.patch_generator.patch_transform = patch_transform
+            # Reuse the generator from generate_dataset, with its scaling percentiles, but
+            # rebuild its full patch table: generate_dataset(n_patches=...) leaves only the
+            # sampled patches in it, and every object must be encoded.
+            self.patch_generator.init_patches()
+            # Label each sample from the saved patches.csv rather than from the
+            # generator's own `dataset`, which only names the last one generated.
+            self.patch_generator.patches['dataset'] = self.patch_generator.patches[
+                self.sample_key
+            ].map(self._sample_to_dataset())
         else:
             if spatial_key_index is None:
                 spatial_key_index = self.spatial_key
@@ -840,23 +881,9 @@ class Phenocoder:
                 patch_transform=patch_transform,
             )
             self.patch_generator.init_patches()
-            if not self.datasets:
-                raise ValueError(
-                    '.datasets is empty -- encode() needs the training datasets to '
-                    'recover per-sample scaling and dataset labels. Set it explicitly, '
-                    'or load a model whose config.yaml records them.'
-                )
-            patches_dfs = [
-                pd.read_csv(Path(self.dir_dataset(ds), 'patches.csv'))
-                for ds in self.datasets
-            ]
-            patches_meta = pd.concat(patches_dfs, ignore_index=True)
-            sample_to_dataset = (
-                patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
-            )
             self.patch_generator.patches['dataset'] = self.patch_generator.patches[
                 self.sample_key
-            ].map(sample_to_dataset)
+            ].map(self._sample_to_dataset())
             if scale:
                 missing = [
                     ds
