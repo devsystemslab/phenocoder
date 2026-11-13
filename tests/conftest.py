@@ -29,6 +29,12 @@ def example_3d():
     df = df.reset_index()
 
     features_obs = [
+        # Segmentation instance id, not a measurement. features_X below is "everything
+        # else", so leaving it out put an identifier in .X as a feature -- where its
+        # magnitude (sd ~18000, an order of magnitude above the intensities) dominated
+        # every group that describes .X, and moran_features and distribution_features
+        # reported autocorrelation and distribution statistics for an id.
+        'label',
         'area',
         'eccentricity',
         'major_axis_length',

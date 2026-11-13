@@ -1,3 +1,6 @@
+import anndata as ad
+import numpy as np
+import pandas as pd
 import pytest
 import scanpy as sc
 
@@ -40,6 +43,8 @@ def test_spatial_stats_all():
     assert 'stat:connectivity' in cols
     assert 'stat:moran_features' in cols
     assert 'stat:moran_clusters' in cols
+    assert 'stat:distribution_interactions' in cols
+    assert 'stat:distribution_features' in cols
     assert 'stat:chull' in cols
     assert 'stat:counts' in cols
 
@@ -65,6 +70,8 @@ def test_spatial_stats_subset():
     assert 'stat:centrality' not in cols
     assert 'stat:moran_features' not in cols
     assert 'stat:moran_clusters' not in cols
+    assert 'stat:distribution_interactions' not in cols
+    assert 'stat:distribution_features' not in cols
     assert 'stat:chull' not in cols
     assert 'stat:counts' not in cols
 
@@ -240,6 +247,265 @@ def test_spatial_stats_invalid_stat():
             index='5',
             stats=['not_a_real_stat'],
         )
+
+
+def test_interaction_mean_recovers_the_graph_wide_sum():
+    """The per-node mean times the source cluster's size is the graph-wide pair count.
+
+    squidpy's interaction matrix is the sum over the per-node neighbor counts, so this is
+    the invariant the per-node statistics are built on. It also pins the from/to
+    orientation: a transposed assembly would still produce a full set of plausible-looking
+    columns, and only an asymmetric pair count catches it.
+    """
+    adata = _clustered_adata()
+    sga = SpatialGraphAnalyzer(
+        adata,
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25,),
+        index='5',
+        stats=['interactions', 'distribution_interactions', 'counts'],
+    )
+    sga.run()
+    row = sga.to_df().iloc[0]
+
+    clusters = adata.obs['leiden'].cat.categories.tolist()
+    for source in clusters:
+        n_source = row[f'stat:counts_count_{source}']
+        for target in clusters:
+            mean = row[
+                f'radius:25_stat:distribution_interactions_mean_{source}_{target}'
+            ]
+            total = row[f'radius:25_stat:interactions_interaction_{source}_{target}']
+            assert mean * n_source == pytest.approx(total, abs=1e-6)
+
+
+def test_interaction_distributions_toggle_independently_of_the_matrix():
+    """Either interaction group can be computed without the other."""
+
+    def _groups(stats):
+        sga = SpatialGraphAnalyzer(
+            _clustered_adata(),
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='5',
+            stats=stats,
+        )
+        sga.run()
+        return ' '.join(sga.to_df().columns)
+
+    matrix_only = _groups(['interactions'])
+    assert 'stat:interactions' in matrix_only
+    assert 'stat:distribution_interactions' not in matrix_only
+
+    distributions_only = _groups(['distribution_interactions'])
+    assert 'stat:distribution_interactions' in distributions_only
+    # the graph-wide matrix columns are prefixed stat:interactions_interaction_
+    assert 'stat:interactions_' not in distributions_only
+
+
+def test_percentiles_add_requested_columns():
+    """Each requested percentile adds a full pair matrix; () leaves mean and sd only."""
+    adata = _clustered_adata()
+    clusters = adata.obs['leiden'].cat.categories.tolist()
+
+    def _columns(percentiles):
+        sga = SpatialGraphAnalyzer(
+            adata,
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='5',
+            stats=['distribution_interactions'],
+            percentiles=percentiles,
+        )
+        sga.run()
+        return sga.to_df().columns.tolist()
+
+    default = _columns(())
+    assert not [name for name in default if '_p10_' in name or '_p50_' in name]
+
+    with_percentiles = _columns((10, 50))
+    added = set(with_percentiles) - set(default)
+    # one column per pair, for each percentile, on both counts and fractions
+    assert len(added) == len(clusters) ** 2 * 2 * 2
+    for source in clusters:
+        for target in clusters:
+            prefix = 'radius:25_stat:distribution_interactions'
+            assert f'{prefix}_p10_{source}_{target}' in added
+            assert f'{prefix}_frac_p50_{source}_{target}' in added
+
+
+def test_spatial_stats_invalid_percentile():
+    """A percentile outside [0, 100] raises, naming the 0-100 scale."""
+    adata = _clustered_adata()
+    with pytest.raises(ValueError, match=r'percentiles must lie'):
+        SpatialGraphAnalyzer(
+            adata,
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='5',
+            percentiles=(10, 101),
+        )
+
+
+def _feature_adata(n=300, seed=0):
+    """Two features on the same scale: one varying smoothly in space, one random."""
+    rng = np.random.default_rng(seed)
+    coords = rng.uniform(0, 300, size=(n, 2))
+    smooth = coords[:, 0]
+    random = rng.normal(size=n) * smooth.std()
+    adata = ad.AnnData(np.column_stack([smooth, random]))
+    adata.var_names = ['smooth', 'random']
+    adata.obs = pd.DataFrame(
+        {'leiden': pd.Categorical(rng.choice(['A', 'B'], size=n))},
+        index=[f'c{i}' for i in range(n)],
+    )
+    adata.obsm['spatial'] = coords
+    return adata
+
+
+def test_feature_stats_raw_block_is_radius_independent():
+    """The raw-value descriptors are emitted once, the neighborhood ones per radius."""
+    sga = SpatialGraphAnalyzer(
+        _feature_adata(),
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25, 50),
+        index='s',
+        stats=['distribution_features'],
+    )
+    sga.run()
+    columns = sga.to_df().columns.tolist()
+
+    raw = [name for name in columns if '_feature_mean_' in name]
+    assert raw == [
+        'stat:distribution_features_feature_mean_smooth',
+        'stat:distribution_features_feature_mean_random',
+    ]
+    # the neighborhood half does depend on the radius, so it appears once per radius
+    nbhd = [name for name in columns if name.endswith('nbhd_mean_smooth')]
+    assert nbhd == [
+        'radius:25_stat:distribution_features_nbhd_mean_smooth',
+        'radius:50_stat:distribution_features_nbhd_mean_smooth',
+    ]
+
+
+def test_feature_stats_raw_descriptors_match_the_matrix():
+    """The raw family has an exact expected value, so assert it rather than its presence."""
+    adata = _feature_adata()
+    sga = SpatialGraphAnalyzer(
+        adata,
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25,),
+        index='s',
+        stats=['distribution_features'],
+        percentiles=(50,),
+    )
+    sga.run()
+    row = sga.to_df().iloc[0]
+
+    for position, var in enumerate(adata.var_names):
+        values = adata.X[:, position]
+        assert row[f'stat:distribution_features_feature_mean_{var}'] == pytest.approx(
+            values.mean()
+        )
+        assert row[f'stat:distribution_features_feature_sd_{var}'] == pytest.approx(
+            values.std()
+        )
+        assert row[f'stat:distribution_features_feature_p50_{var}'] == pytest.approx(
+            np.percentile(values, 50)
+        )
+
+
+def test_feature_neighborhood_mean_includes_the_cell_itself():
+    """Two cells in radius average each other; an isolated one reports its own value.
+
+    Pins the self-loop convention borrowed from spatial_message_passing. Without it an
+    isolated cell would divide by a zero degree, and filling 0 instead would invent a
+    measurement indistinguishable from a real one for a feature centered near zero.
+    """
+    adata = ad.AnnData(np.array([[1.0], [3.0], [10.0]]))
+    adata.var_names = ['f']
+    adata.obs = pd.DataFrame(
+        {'leiden': pd.Categorical(['A', 'A', 'A'])},
+        index=['near1', 'near2', 'far'],
+    )
+    # the first two sit well inside the radius; the third is far outside it
+    adata.obsm['spatial'] = np.array([[0.0, 0.0], [5.0, 0.0], [9000.0, 0.0]])
+
+    sga = SpatialGraphAnalyzer(
+        adata,
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25,),
+        index='s',
+        stats=['distribution_features'],
+        percentiles=(),
+    )
+    sga.run()
+    row = sga.to_df().iloc[0]
+
+    # neighborhood means are (1+3)/2 = 2 for both near cells, and 10 for the isolated one
+    assert row['radius:25_stat:distribution_features_nbhd_mean_f'] == pytest.approx(
+        (2.0 + 2.0 + 10.0) / 3
+    )
+
+
+def test_feature_neighborhood_averaging_keeps_smooth_feature_spread():
+    """A spatially smooth feature keeps its spread; a random one loses most of it.
+
+    This is the behavior that makes the neighborhood family worth having next to the raw
+    one: both features have the same raw sd by construction.
+    """
+    sga = SpatialGraphAnalyzer(
+        _feature_adata(n=2000),
+        cluster_key='leiden',
+        spatial_key='spatial',
+        radii=(25,),
+        index='s',
+        stats=['distribution_features'],
+    )
+    sga.run()
+    row = sga.to_df().iloc[0]
+
+    retained = {}
+    for var in ('smooth', 'random'):
+        raw = row[f'stat:distribution_features_feature_sd_{var}']
+        nbhd = row[f'radius:25_stat:distribution_features_nbhd_sd_{var}']
+        retained[var] = nbhd / raw
+    assert retained['smooth'] > 0.9
+    assert retained['random'] < 0.5
+
+
+def test_feature_stats_percentiles_follow_the_shared_argument():
+    """Both halves of the group honour percentiles, and () leaves mean and sd only."""
+
+    def _columns(percentiles):
+        sga = SpatialGraphAnalyzer(
+            _feature_adata(),
+            cluster_key='leiden',
+            spatial_key='spatial',
+            radii=(25,),
+            index='s',
+            stats=['distribution_features'],
+            percentiles=percentiles,
+        )
+        sga.run()
+        return sga.to_df().columns.tolist()
+
+    plain = _columns(())
+    statistics = {name.rsplit('_', 2)[-2] for name in plain}
+    assert statistics == {'mean', 'sd'}
+
+    added = set(_columns((25, 75))) - set(plain)
+    # two percentiles x two features, in each of the raw and neighborhood families
+    assert len(added) == 2 * 2 * 2
+    assert 'stat:distribution_features_feature_p25_smooth' in added
+    assert 'radius:25_stat:distribution_features_nbhd_p75_random' in added
 
 
 if __name__ == '__main__':

@@ -217,7 +217,7 @@ pheno.spatialgraph_stats(
 
 By default every stat group is computed. Pass `stats=[...]` to select a subset — valid groups
 are `interactions`, `centrality`, `connectivity`, `moran_features`, `moran_clusters`,
-`chull` and `counts`:
+`distribution_interactions`, `distribution_features`, `chull` and `counts`:
 
 ```python
 pheno.spatialgraph_stats(
@@ -228,6 +228,26 @@ pheno.spatialgraph_stats(
     stats=["interactions", "connectivity"],  # only these groups
 )
 ```
+
+The two `distribution_` groups describe the per-node distributions behind the graph-wide
+statistics, and can be selected or dropped independently of them.
+
+`interactions` sums cluster-cluster contacts over the whole graph, which cannot
+distinguish every `a` cell having one `b` neighbor from a few `a` cells carrying all the
+`b` contacts. `distribution_interactions` describes the per-cell distribution behind that
+sum, as neighbor counts and (with a `frac` prefix) as each cell's neighbor fractions.
+
+`distribution_features` does the same for the continuous features in `.X`, which
+`moran_features` reduces to a single autocorrelation value each. The `feature_*` columns
+describe each feature across the sample's cells (no graph, so they carry no `radius:`
+prefix); the `nbhd_*` columns first average each feature over every cell's neighborhood,
+including the cell itself, then describe that. A spatially smooth feature keeps most of its
+spread after that averaging, a random one loses it.
+
+Both report the mean and sd, plus the percentiles named by `percentiles=(25, 50, 75)` — on
+a 0-100 scale, unlike the `[0, 1]` percentiles of `aggregate_subunits`. Each percentile
+adds `n_clusters ** 2 * 2` columns per radius to `distribution_interactions` and `n_vars`
+to each half of `distribution_features`; pass `percentiles=()` for mean and sd alone.
 
 ## Model Architecture
 
