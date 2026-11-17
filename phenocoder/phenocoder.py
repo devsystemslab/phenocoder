@@ -455,6 +455,15 @@ class Phenocoder:
             sample_key=self.sample_key,
         )
         self.data_loader.load_datasets()
+        # What `encode` needs from the training datasets, kept with the model so it can
+        # encode without them (e.g. on a node where only the model directory is available).
+        self.data_loader.stats.to_csv(Path(self.model_dir, 'stats.csv'), index=False)
+        (
+            self.data_loader.patches.groupby(self.sample_key)['dataset']
+            .first()
+            .reset_index()
+            .to_csv(Path(self.model_dir, 'sample_datasets.csv'), index=False)
+        )
         # Pass batch_size through: the split truncation and the generators must agree on it,
         # or patches are dropped to align with 64 while batching happens at another size.
         self.data_loader.set_train_val_split(batch_size=batch_size)
@@ -589,6 +598,9 @@ class Phenocoder:
                 n_classes=self.model_config['conditions_dim'],
             )
             self.model_oh_enc = joblib.load(Path(self.model_dir, 'oh_encoder.joblib'))
+            # Encoders saved before `handle_unknown='ignore'` became the default would refuse
+            # a condition value the training patches never had (e.g. a sparse z plane).
+            self.model_oh_enc.handle_unknown = 'ignore'
         else:
             self.model = CVAE(
                 input_shape=tuple(self.model_config['input_shape']),
@@ -716,6 +728,7 @@ class Phenocoder:
         scale_percentile: int = 1,
         scale_per_sample: bool = True,
         spatial_message_passing_radius: int = None,
+        dataset: str | None = None,
     ) -> None:
         """
         Encode nuclei patches into latent space representations using the trained model.
@@ -740,6 +753,10 @@ class Phenocoder:
                 latents over a spatial neighborhood graph of this radius (degree-normalized
                 aggregation), stored in ``.layers['spatial_message_passing']``. If None, no
                 message passing is applied. Defaults to None.
+            dataset (str | None, optional): The ``dataset`` label of samples the model was not
+                trained on. Needed only when the model is conditioned on ``'dataset'`` and was
+                trained on several; with a single training dataset that one is used. Samples
+                the model was trained on keep their own. Defaults to None.
 
         Returns:
             None: The encoded latents are written to ``self.sdata.tables['phenocoder']`` as an
@@ -749,8 +766,14 @@ class Phenocoder:
         Note:
             The condition names ``'z'`` and ``'dataset'`` are treated specially: ``'z'`` is
             derived from the spatial coordinates and ``'dataset'`` is reconstructed from the
-            saved ``patches.csv``. Any other condition columns are carried over from the
+            training patches. Any other condition columns are carried over from the
             table's ``.obs``.
+
+            The scaling ranges and dataset labels are read from what ``initialize_model``
+            saved in the model directory (``stats.csv``, ``sample_datasets.csv``), so the
+            training datasets need not be present; models saved before then fall back to the
+            datasets' own ``stats.csv`` / ``patches.csv``. With ``scale_per_sample``, a sample
+            missing from those statistics is scaled to the range of its own image.
 
         Example:
             >>> phenocoder.encode(batch_size=128, spatial_message_passing_radius=50)
@@ -784,29 +807,39 @@ class Phenocoder:
                 scale_per_sample=scale_per_sample,
             )
             self.patch_generator.init_patches()
-            if not self.datasets:
-                raise ValueError(
-                    '.datasets is empty -- encode() needs the training datasets to '
-                    'recover per-sample scaling and dataset labels. Set it explicitly, '
-                    'or load a model whose config.yaml records them.'
-                )
-            patches_dfs = [
-                pd.read_csv(Path(self.dir_dataset(ds), 'patches.csv'))
-                for ds in self.datasets
-            ]
-            patches_meta = pd.concat(patches_dfs, ignore_index=True)
-            sample_to_dataset = (
-                patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
+            sample_to_dataset = self._training_sample_datasets()
+            samples_dataset = self.patch_generator.patches[self.sample_key].map(
+                sample_to_dataset
             )
-            self.patch_generator.patches['dataset'] = self.patch_generator.patches[
-                self.sample_key
-            ].map(sample_to_dataset)
+            unseen = samples_dataset.isna()
+            if unseen.any():
+                fill = dataset
+                if fill is None and len(self.datasets or []) == 1:
+                    fill = self.datasets[0]
+                conditioned_on_dataset = self.model_config['conditional'] and (
+                    'dataset' in self.model_oh_enc.feature_names_in_
+                )
+                if fill is None and conditioned_on_dataset:
+                    raise ValueError(
+                        f'{self.patch_generator.patches.loc[unseen, self.sample_key].nunique()} '
+                        "sample(s) are not in the model's training datasets "
+                        f'{self.datasets}, and the model is conditioned on "dataset": pass '
+                        'encode(dataset=...) to say which dataset they belong to.'
+                    )
+                if fill is not None:
+                    samples_dataset = samples_dataset.fillna(fill)
+            self.patch_generator.patches['dataset'] = samples_dataset
             if scale:
-                stats_dfs = [
-                    pd.read_csv(Path(self.dir_dataset(ds), 'stats.csv'))
-                    for ds in self.datasets
-                ]
-                self.patch_generator.df_stats = pd.concat(stats_dfs, ignore_index=True)
+                self.patch_generator.df_stats = self._training_stats()
+                if scale_per_sample:
+                    # Each sample is scaled to its own range, so a sample the model was not
+                    # trained on gets its range from its own image, as training would have.
+                    known = set(
+                        self.patch_generator.df_stats['sample_id'].astype(str)
+                    )
+                    for sample in samples:
+                        if str(sample) not in known:
+                            self.patch_generator.generate_image_stats(sample)
                 self.patch_generator.get_scaling_percentiles()
         for sample in samples:
             patches, df_patches = self.patch_generator.get_patches(sample)
@@ -836,6 +869,44 @@ class Phenocoder:
                 )
             adatas.append(adata)
         self.sdata.tables['phenocoder'] = ad.concat(adatas)
+
+    def _training_file(self, name: str) -> list[Path]:
+        """
+        Where to read a training-time table for ``encode``: the copy kept in the model
+        directory, else (models saved before such copies were kept) one per training dataset.
+
+        Args:
+            name (str): ``'stats.csv'`` or ``'patches.csv'``; the model directory keeps the
+                dataset labels of ``patches.csv`` as ``sample_datasets.csv``.
+
+        Raises:
+            ValueError: If neither the model directory nor ``.datasets`` provides it.
+        """
+        kept = 'sample_datasets.csv' if name == 'patches.csv' else name
+        if self.model_dir is not None and Path(self.model_dir, kept).exists():
+            return [Path(self.model_dir, kept)]
+        if not self.datasets:
+            raise ValueError(
+                f'No {kept} in the model directory and .datasets is empty -- encode() needs '
+                'the training statistics to recover per-sample scaling and dataset labels. '
+                'Load a model whose directory or config.yaml records them, or set .datasets.'
+            )
+        return [Path(self.dir_dataset(ds), name) for ds in self.datasets]
+
+    def _training_stats(self) -> pd.DataFrame:
+        """The per-slice image statistics of the training samples, for scaling in ``encode``."""
+        return pd.concat(
+            [pd.read_csv(path) for path in self._training_file('stats.csv')],
+            ignore_index=True,
+        )
+
+    def _training_sample_datasets(self) -> dict:
+        """The dataset each training sample came from, ``{sample: dataset}``."""
+        patches = pd.concat(
+            [pd.read_csv(path) for path in self._training_file('patches.csv')],
+            ignore_index=True,
+        )
+        return patches.groupby(self.sample_key)['dataset'].first().to_dict()
 
     def spatialgraph_stats(
         self,

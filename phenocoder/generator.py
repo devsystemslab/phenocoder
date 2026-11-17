@@ -632,7 +632,7 @@ class DatasetLoader:
                 otherwise ``(train_generator, val_generator)``
         """
         if conditions:
-            enc = OneHotEncoder()
+            enc = OneHotEncoder(handle_unknown='ignore')
             cond = enc.fit_transform(self.patches[conditions]).toarray()
             generator_train = SequenceGenerator(
                 self.patches[self.patches['split'] == 'train']['file_path'].values,
