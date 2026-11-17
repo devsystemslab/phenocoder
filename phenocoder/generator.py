@@ -225,8 +225,6 @@ class PatchGenerator:
         self.patch_size = tuple(patch_size)
         self.df_stats = pd.DataFrame()
         self.patches = None
-        # name of the dataset written by generate_dataset; encode labels patches with it
-        self.dataset = None
         self.percentiles_low = None
         self.percentiles_high = None
         # per-sample lookups {sample_id: array over channels}, built by
@@ -646,7 +644,6 @@ class PatchGenerator:
                 The files are identical to ``n_workers=1``; ``patches.csv`` is written once,
                 by this process. Defaults to 1 (no worker processes).
         """
-        self.dataset = dataset
         self.dir_dataset = Path(dir_dataset)
         self.dir_dataset.mkdir(exist_ok=True, parents=True)
         self.samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
