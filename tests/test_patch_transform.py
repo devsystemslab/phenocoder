@@ -1,5 +1,6 @@
 """Tests for patch_transform, skipping statistics with scale=False, and parallel writing."""
 
+import contextlib
 import functools
 import warnings
 from pathlib import Path
@@ -279,6 +280,87 @@ def test_transform_must_return_three_dimensions():
     img = np.zeros((2, 8, 8))
     with pytest.raises(ValueError, match=r'\(c, h, w\)'):
         cut_patch(img, 4, 4, 0, (4, 4), patch_transform=lambda patch, row: patch[0])
+
+
+def test_unscaled_regeneration_removes_stale_stats(tmp_path):
+    """A scaled dataset's stats.csv must not survive regenerating it unscaled."""
+    pheno = example_3d()
+    pheno.dir_project = tmp_path
+    pheno.generate_dataset(
+        dataset='ds',
+        patch_size=PATCH_SIZE,
+        spatial_key_index='spatial_index',
+        scale=True,
+        n_patches=20,
+    )
+    stats = Path(pheno.dir_dataset('ds'), 'stats.csv')
+    assert stats.exists()
+
+    again = example_3d()
+    again.dir_project = tmp_path
+    again.generate_dataset(
+        dataset='ds',
+        patch_size=PATCH_SIZE,
+        spatial_key_index='spatial_index',
+        scale=False,
+        n_patches=20,
+    )
+    assert not stats.exists()
+
+
+def test_missing_stats_leaves_no_cached_generator(tmp_path):
+    """After the raise, the retry it asks for must not reuse a generator without
+    percentiles."""
+    pheno = example_3d()
+    pheno.dir_project = tmp_path
+    pheno.generate_dataset(
+        dataset='ds',
+        patch_size=PATCH_SIZE,
+        spatial_key_index='spatial_index',
+        scale=False,
+        n_patches=20,
+    )
+    pheno.model_config = {
+        'patch_transform': None,
+        'conditional': False,
+        'input_shape': (32, 32, 4),
+    }
+    pheno.datasets = ['ds']
+    pheno.patch_generator = None
+
+    with pytest.raises(ValueError, match='stats.csv'):
+        pheno.encode(batch_size=8, scale=True, spatial_key_index='spatial_index')
+    assert pheno.patch_generator is None
+
+
+def test_reused_generator_warns_on_scale_mismatch(tmp_path):
+    """A reused generator keeps its own scaling, so a differing scale= must warn."""
+    pheno = example_3d()
+    pheno.dir_project = tmp_path
+    pheno.generate_dataset(
+        dataset='ds',
+        patch_size=PATCH_SIZE,
+        spatial_key_index='spatial_index',
+        scale=False,
+        n_patches=20,
+    )
+    pheno.model_config = {
+        'patch_transform': None,
+        'conditional': False,
+        'input_shape': (32, 32, 4),
+    }
+    assert pheno.patch_generator.scale is False
+
+    with pytest.warns(UserWarning, match='reusing the patch generator'):
+        with contextlib.suppress(Exception):
+            pheno.encode(batch_size=8, scale=True)
+
+    # no warning when the generator already scales the way encode() asks
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        with contextlib.suppress(Exception):
+            pheno.encode(batch_size=8, scale=False)
+    assert not [w for w in caught if 'reusing the patch generator' in str(w.message)]
 
 
 def test_datasets_with_different_transforms_are_rejected():

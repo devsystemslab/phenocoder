@@ -801,6 +801,17 @@ class Phenocoder:
         adatas = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
         if self.patch_generator is not None:
+            # A reused generator keeps the scaling it was built with; encode()'s own
+            # scale argument is not applied to it, so say so rather than returning
+            # latents that silently disagree with what was asked for.
+            if bool(self.patch_generator.scale) != bool(scale):
+                warnings.warn(
+                    f'encode(scale={scale!r}) is reusing the patch generator from '
+                    f'generate_dataset(scale={self.patch_generator.scale!r}), whose '
+                    'scaling is kept. Encode from a fresh Phenocoder to apply '
+                    f'scale={scale!r}.',
+                    stacklevel=2,
+                )
             self.patch_generator.patch_transform = patch_transform
         else:
             if spatial_key_index is None:
@@ -853,6 +864,10 @@ class Phenocoder:
                     if not Path(self.dir_dataset(ds), 'stats.csv').exists()
                 ]
                 if missing:
+                    # Drop the half-built generator: it is cached with scale=True and no
+                    # percentiles, so the retry this message asks for would reuse it and
+                    # fail again with a different error.
+                    self.patch_generator = None
                     raise ValueError(
                         f"encode(scale=True) needs each dataset's stats.csv, but "
                         f'{missing} have none: they were generated with scale=False. '

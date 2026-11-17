@@ -644,6 +644,11 @@ class PatchGenerator:
             ]
             self.df_stats.to_csv(Path(self.dir_dataset, 'stats.csv'), index=False)
             self.get_scaling_percentiles()
+        else:
+            # Regenerating an unscaled dataset over a scaled one: the old stats.csv
+            # describes patches that no longer exist, and encode(scale=True) would
+            # read it and scale with it instead of reporting that it is missing.
+            Path(self.dir_dataset, 'stats.csv').unlink(missing_ok=True)
         if n_patches is not None:
             self.patches = self.patches.sample(n_patches, replace=False)
             self.samples = self.patches[self.sample_key].unique()
