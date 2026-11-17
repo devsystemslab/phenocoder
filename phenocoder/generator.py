@@ -45,7 +45,10 @@ def patch_transform_name(patch_transform: PatchTransform | None) -> str | None:
     qualname = getattr(patch_transform, '__qualname__', None)
     if qualname is None:  # a callable instance: name its class
         qualname = type(patch_transform).__qualname__
-    return f'{patch_transform.__module__}.{qualname}'
+    module = getattr(patch_transform, '__module__', None)
+    if module is None:  # a C-implemented callable: name it alone
+        return qualname
+    return f'{module}.{qualname}'
 
 
 def cut_patch(
