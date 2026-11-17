@@ -6,7 +6,7 @@ Everything a Phenocoder run produces lives under a single `dir_project`:
 
 ```
 dir_project/
-├── <dataset>/              patches.csv, stats.csv, *.npy
+├── <dataset>/              patches.csv, dataset.yaml, *.npy, stats.csv (scale=True only)
 ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
 ├── tensorboard_logs/<model_name>/
 ├── reference/              saved spatial-graph embedding transforms

@@ -18,7 +18,12 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from umap import UMAP
 
-from phenocoder.generator import DatasetLoader, PatchGenerator
+from phenocoder.generator import (
+    DatasetLoader,
+    PatchGenerator,
+    PatchTransform,
+    patch_transform_name,
+)
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.reference import (
     apply_transform,
@@ -48,7 +53,7 @@ class Phenocoder:
     All artifacts produced by a Phenocoder run live under a single ``dir_project``::
 
         dir_project/
-        ├── <dataset>/              patches.csv, stats.csv, *.npy
+        ├── <dataset>/              patches.csv, dataset.yaml, *.npy, stats.csv (scale=True only)
         ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
         ├── tensorboard_logs/<model_name>/
         ├── reference/              saved spatial-graph embedding transforms
@@ -299,6 +304,8 @@ class Phenocoder:
         scale_per_sample: bool = True,
         n_samples: int | None = None,
         n_patches: int | None = None,
+        patch_transform: PatchTransform | None = None,
+        n_workers: int = 1,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -318,7 +325,8 @@ class Phenocoder:
                 object. Must match the height/width of the model's input_shape. Defaults to (128, 128).
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
             If None, uses the instance's spatial_key attribute. Defaults to None.
-            scale (bool, optional): Whether to scale the image patches. Defaults to True.
+            scale (bool, optional): Whether to scale the image patches. Defaults to True. With
+                ``scale=False`` no image statistics are computed and no ``stats.csv`` is written.
             metadata_keys (list[str] | None, optional): Additional columns from the table's
                 ``.obs`` to carry into ``patches.csv`` so they can be used as conditioning
                 variables (e.g. a ``sample``/donor column). Defaults to None.
@@ -329,6 +337,20 @@ class Phenocoder:
                 own intensity range (per sample+channel). If False, use one global range per
                 channel across all samples (original behaviour). NOTE: pass the SAME value to
                 ``encode`` so training and inference scale identically.
+            n_samples (int | None, optional): Number of samples to randomly select. Defaults to
+                None (all samples).
+            n_patches (int | None, optional): Number of patches to randomly select. Defaults to
+                None (all patches).
+            patch_transform (callable | None, optional): ``patch_transform(patch, obs_row)``,
+                applied to each cut (and, if ``scale``, scaled) (c, h, w) patch; ``obs_row`` is
+                the object's row of the table's ``.obs``. What it returns is what is written,
+                so it may change the number of channels (set ``input_shape`` to match) and the
+                dtype. Its name is written to ``dataset.yaml`` and from there to the model's
+                ``config.yaml``; pass the same transform to ``encode``. Defaults to None.
+            n_workers (int, optional): Number of processes writing patches, one sample each at
+                a time; memory is about ``n_workers`` times the largest image. The files are
+                identical to ``n_workers=1``. With ``n_workers > 1``, ``patch_transform`` must
+                be a module-level function or a ``functools.partial`` of one. Defaults to 1.
 
         Returns:
             None
@@ -370,12 +392,14 @@ class Phenocoder:
             metadata_keys=metadata_keys,
             scale_percentile=scale_percentile,
             scale_per_sample=scale_per_sample,
+            patch_transform=patch_transform,
         )
         self.patch_generator.generate_dataset(
             dataset,
             dir_dataset=self.dir_dataset(dataset),
             n_samples=n_samples,
             n_patches=n_patches,
+            n_workers=n_workers,
         )
 
     def initialize_model(
@@ -475,6 +499,9 @@ class Phenocoder:
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
+            # name of the transform the training patches were made with (from each
+            # dataset's dataset.yaml); encode() warns if given a different one
+            'patch_transform': self.data_loader.get_patch_transform(),
         }
 
         if conditions:
@@ -716,6 +743,7 @@ class Phenocoder:
         scale_percentile: int = 1,
         scale_per_sample: bool = True,
         spatial_message_passing_radius: int = None,
+        patch_transform: PatchTransform | None = None,
     ) -> None:
         """
         Encode nuclei patches into latent space representations using the trained model.
@@ -740,6 +768,11 @@ class Phenocoder:
                 latents over a spatial neighborhood graph of this radius (degree-normalized
                 aggregation), stored in ``.layers['spatial_message_passing']``. If None, no
                 message passing is applied. Defaults to None.
+            patch_transform (callable | None, optional): The transform the training patches
+                were made with (see ``generate_dataset``); applied to every patch before
+                encoding, also when the patch_generator from ``generate_dataset`` is reused.
+                A warning is raised if its name differs from the one in the model's
+                ``config.yaml``. Defaults to None.
 
         Returns:
             None: The encoded latents are written to ``self.sdata.tables['phenocoder']`` as an
@@ -756,9 +789,31 @@ class Phenocoder:
             >>> phenocoder.encode(batch_size=128, spatial_message_passing_radius=50)
             >>> phenocoder.sdata.tables['phenocoder']  # AnnData of latents
         """
+        trained_with = self.model_config.get('patch_transform')
+        given = patch_transform_name(patch_transform)
+        if given != trained_with:
+            warnings.warn(
+                f'encode() was given patch_transform={given!r}, but the model was trained '
+                f'on patches made with {trained_with!r}. The latents will not be '
+                'comparable to training; pass the same transform to encode().',
+                stacklevel=2,
+            )
         adatas = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
-        if self.patch_generator is None:
+        if self.patch_generator is not None:
+            # A reused generator keeps the scaling it was built with; encode()'s own
+            # scale argument is not applied to it, so say so rather than returning
+            # latents that silently disagree with what was asked for.
+            if bool(self.patch_generator.scale) != bool(scale):
+                warnings.warn(
+                    f'encode(scale={scale!r}) is reusing the patch generator from '
+                    f'generate_dataset(scale={self.patch_generator.scale!r}), whose '
+                    'scaling is kept. Encode from a fresh Phenocoder to apply '
+                    f'scale={scale!r}.',
+                    stacklevel=2,
+                )
+            self.patch_generator.patch_transform = patch_transform
+        else:
             if spatial_key_index is None:
                 spatial_key_index = self.spatial_key
             # condition columns the encoder was trained on that must be carried
@@ -782,6 +837,7 @@ class Phenocoder:
                 metadata_keys=metadata_keys,
                 scale_percentile=scale_percentile,
                 scale_per_sample=scale_per_sample,
+                patch_transform=patch_transform,
             )
             self.patch_generator.init_patches()
             if not self.datasets:
@@ -802,6 +858,21 @@ class Phenocoder:
                 self.sample_key
             ].map(sample_to_dataset)
             if scale:
+                missing = [
+                    ds
+                    for ds in self.datasets
+                    if not Path(self.dir_dataset(ds), 'stats.csv').exists()
+                ]
+                if missing:
+                    # Drop the half-built generator: it is cached with scale=True and no
+                    # percentiles, so the retry this message asks for would reuse it and
+                    # fail again with a different error.
+                    self.patch_generator = None
+                    raise ValueError(
+                        f"encode(scale=True) needs each dataset's stats.csv, but "
+                        f'{missing} have none: they were generated with scale=False. '
+                        'Call encode(scale=False), or regenerate them with scale=True.'
+                    )
                 stats_dfs = [
                     pd.read_csv(Path(self.dir_dataset(ds), 'stats.csv'))
                     for ds in self.datasets
