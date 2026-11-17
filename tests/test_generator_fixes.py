@@ -172,16 +172,26 @@ def test_non_square_and_odd_patch_sizes(tmp_path, patch_size):
 # --- fix 8: smaller ones -------------------------------------------------------------------
 
 
-def test_mad_is_per_slice():
-    """Each slice's MAD is taken around that slice's own median."""
+def test_mad_is_centred_per_channel():
+    """MAD is taken around each channel's median over all of its slices."""
     rng = np.random.default_rng(0)
     base = rng.normal(size=(4, 4))
-    # one channel, two slices: the second is the first shifted by 100
-    imgs = np.stack([base, base + 100])[np.newaxis]
-    stand_in = SimpleNamespace(channels=['c0'], scale_percentile=1)
+    # two channels at very different intensities, two slices each
+    dim = np.stack([base, base + 1])
+    bright = np.stack([base + 1000, base + 1001])
+    imgs = np.stack([dim, bright])
+    stand_in = SimpleNamespace(channels=['c0', 'c1'], scale_percentile=1)
     df = PatchGenerator.__get_image_stats__(stand_in, imgs, 's', 'sample_id')
-    expected = np.median(np.abs(base - np.median(base)))
-    np.testing.assert_allclose(df['mad'].to_numpy(), [expected, expected])
+
+    expected = [
+        np.median(np.abs(sl - np.median(ch))) for ch in (dim, bright) for sl in ch
+    ]
+    np.testing.assert_allclose(df['mad'].to_numpy(), expected)
+    # a channel 1000 apart from the other has the same spread, not a 1000-wide one
+    np.testing.assert_allclose(
+        df[df['channel'] == 'c0']['mad'].to_numpy(),
+        df[df['channel'] == 'c1']['mad'].to_numpy(),
+    )
 
 
 def test_scaling_leaves_percentiles_unchanged():

@@ -403,9 +403,13 @@ class PatchGenerator:
         mean = np.mean(imgs, axis=(-2, -1))
         std = np.std(imgs, axis=(-2, -1))
         median = np.median(imgs, axis=(-2, -1))
-        # each slice's deviation from its own median, not from one median over everything
+        # Deviation from the channel's own median, taken over all of its slices. Centring
+        # on one median across every channel measures the gap between channels rather than
+        # the spread within one; centring per slice hides drift from slice to slice.
+        channel_median = np.median(imgs, axis=(1, -2, -1))
         mad = np.median(
-            np.abs(imgs - median[..., np.newaxis, np.newaxis]), axis=(-2, -1)
+            np.abs(imgs - channel_median[:, np.newaxis, np.newaxis, np.newaxis]),
+            axis=(-2, -1),
         )
         max = np.max(imgs, axis=(-2, -1))
         min = np.min(imgs, axis=(-2, -1))
