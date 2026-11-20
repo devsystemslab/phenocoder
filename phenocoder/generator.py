@@ -993,7 +993,7 @@ class DatasetLoader:
         enc = None
         cond = None
         if conditions:
-            enc = OneHotEncoder()
+            enc = OneHotEncoder(handle_unknown='ignore')
             cond = enc.fit_transform(self.patches[conditions]).toarray()
 
         def make_generator(split: str) -> SequenceGenerator:
