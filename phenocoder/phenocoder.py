@@ -18,7 +18,12 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from umap import UMAP
 
-from phenocoder.generator import DatasetLoader, PatchGenerator
+from phenocoder.generator import (
+    DatasetLoader,
+    PatchGenerator,
+    PatchTransform,
+    patch_transform_name,
+)
 from phenocoder.model import CVAE, CondCVAE
 from phenocoder.reference import (
     apply_transform,
@@ -48,7 +53,7 @@ class Phenocoder:
     All artifacts produced by a Phenocoder run live under a single ``dir_project``::
 
         dir_project/
-        ├── <dataset>/              patches.csv, stats.csv, *.npy
+        ├── <dataset>/              patches.csv, dataset.yaml, *.npy, stats.csv (scale=True only)
         ├── models/<model_name>/    config.yaml, model.weights.h5, oh_encoder.joblib
         ├── tensorboard_logs/<model_name>/
         ├── reference/              saved spatial-graph embedding transforms
@@ -299,6 +304,8 @@ class Phenocoder:
         scale_per_sample: bool = True,
         n_samples: int | None = None,
         n_patches: int | None = None,
+        patch_transform: PatchTransform | None = None,
+        n_workers: int = 1,
     ) -> None:
         """
         Generate an image patch dataset for phenotyping from input microscopy images.
@@ -318,7 +325,8 @@ class Phenocoder:
                 object. Must match the height/width of the model's input_shape. Defaults to (128, 128).
             spatial_key_index (str | None, optional): Spatial key index to use, integer relating to z-index in image array.
             If None, uses the instance's spatial_key attribute. Defaults to None.
-            scale (bool, optional): Whether to scale the image patches. Defaults to True.
+            scale (bool, optional): Whether to scale the image patches. Defaults to True. With
+                ``scale=False`` no image statistics are computed and no ``stats.csv`` is written.
             metadata_keys (list[str] | None, optional): Additional columns from the table's
                 ``.obs`` to carry into ``patches.csv`` so they can be used as conditioning
                 variables (e.g. a ``sample``/donor column). Defaults to None.
@@ -329,6 +337,20 @@ class Phenocoder:
                 own intensity range (per sample+channel). If False, use one global range per
                 channel across all samples (original behaviour). NOTE: pass the SAME value to
                 ``encode`` so training and inference scale identically.
+            n_samples (int | None, optional): Number of samples to randomly select. Defaults to
+                None (all samples).
+            n_patches (int | None, optional): Number of patches to randomly select. Defaults to
+                None (all patches).
+            patch_transform (callable | None, optional): ``patch_transform(patch, obs_row)``,
+                applied to each cut (and, if ``scale``, scaled) (c, h, w) patch; ``obs_row`` is
+                the object's row of the table's ``.obs``. What it returns is what is written,
+                so it may change the number of channels (set ``input_shape`` to match) and the
+                dtype. Its name is written to ``dataset.yaml`` and from there to the model's
+                ``config.yaml``; pass the same transform to ``encode``. Defaults to None.
+            n_workers (int, optional): Number of processes writing patches, one sample each at
+                a time; memory is about ``n_workers`` times the largest image. The files are
+                identical to ``n_workers=1``. With ``n_workers > 1``, ``patch_transform`` must
+                be a module-level function or a ``functools.partial`` of one. Defaults to 1.
 
         Returns:
             None
@@ -370,12 +392,14 @@ class Phenocoder:
             metadata_keys=metadata_keys,
             scale_percentile=scale_percentile,
             scale_per_sample=scale_per_sample,
+            patch_transform=patch_transform,
         )
         self.patch_generator.generate_dataset(
             dataset,
             dir_dataset=self.dir_dataset(dataset),
             n_samples=n_samples,
             n_patches=n_patches,
+            n_workers=n_workers,
         )
 
     def initialize_model(
@@ -454,19 +478,22 @@ class Phenocoder:
             dir_datasets={ds: self.dir_dataset(ds) for ds in self.datasets},
             sample_key=self.sample_key,
         )
-        self.data_loader.load_datasets()
-        # What `encode` needs from the training datasets, kept with the model so it can
-        # encode without them (e.g. on a node where only the model directory is available).
-        self.data_loader.stats.to_csv(Path(self.model_dir, 'stats.csv'), index=False)
-        (
-            self.data_loader.patches.groupby(self.sample_key)['dataset']
-            .first()
-            .reset_index()
-            .to_csv(Path(self.model_dir, 'sample_datasets.csv'), index=False)
-        )
-        # Pass batch_size through: the split truncation and the generators must agree on it,
-        # or patches are dropped to align with 64 while batching happens at another size.
+        # set_train_val_split loads the datasets itself (patches.csv / stats.csv), so they
+        # are read once. Pass batch_size through: the split truncation and the generators
+        # must agree on it, or patches are dropped to align with 64 while batching happens
+        # at another size.
         self.data_loader.set_train_val_split(batch_size=batch_size)
+        # What `encode` needs from the training datasets, kept with the model so it can
+        # encode without them (e.g. on a node where only the model directory is available):
+        # the image statistics, where the datasets have them (none with scale=False), and the
+        # dataset each sample was generated into, from the full patches.csv files (the split
+        # above drops a remainder of the patches).
+        if self.data_loader.stats is not None:
+            self.data_loader.stats.to_csv(Path(self.model_dir, 'stats.csv'), index=False)
+        pd.DataFrame(
+            list(self._datasets_sample_to_dataset().items()),
+            columns=[self.sample_key, 'dataset'],
+        ).to_csv(Path(self.model_dir, 'sample_datasets.csv'), index=False)
 
         self.model_config = {
             'n_latent_dim': n_latent_dim,
@@ -484,6 +511,9 @@ class Phenocoder:
             'batch_size': batch_size,
             'n_workers': n_workers,
             'beta': beta,
+            # name of the transform the training patches were made with (from each
+            # dataset's dataset.yaml); encode() warns if given a different one
+            'patch_transform': self.data_loader.get_patch_transform(),
         }
 
         if conditions:
@@ -720,6 +750,86 @@ class Phenocoder:
                 plot_frac=plot_frac,
             )
 
+    def _datasets_sample_to_dataset(self) -> dict:
+        """
+        Map each sample to the dataset it was generated into, from the datasets themselves.
+
+        Read from the saved ``patches.csv`` files, so a project with several datasets
+        labels every sample with its own rather than with one name for all of them.
+
+        Returns:
+            dict: ``{sample: dataset}`` over every sample in ``self.datasets``.
+
+        Raises:
+            ValueError: If ``.datasets`` is empty.
+        """
+        if not self.datasets:
+            raise ValueError(
+                '.datasets is empty -- encode() needs the training datasets to '
+                'recover per-sample scaling and dataset labels. Set it explicitly, '
+                'or load a model whose config.yaml records them.'
+            )
+        patches_meta = pd.concat(
+            [
+                pd.read_csv(Path(self.dir_dataset(ds), 'patches.csv'))
+                for ds in self.datasets
+            ],
+            ignore_index=True,
+        )
+        return patches_meta.groupby(self.sample_key)['dataset'].first().to_dict()
+
+    def _sample_to_dataset(self) -> dict:
+        """
+        Map each training sample to the dataset it was generated into.
+
+        Read from ``sample_datasets.csv`` in the model directory, which ``initialize_model``
+        keeps so that the training datasets need not be present to encode; models saved
+        before then fall back to the datasets' ``patches.csv`` files.
+
+        Returns:
+            dict: ``{sample: dataset}``.
+        """
+        if self.model_dir is not None and Path(self.model_dir, 'sample_datasets.csv').exists():
+            kept = pd.read_csv(Path(self.model_dir, 'sample_datasets.csv'))
+            return kept.groupby(self.sample_key)['dataset'].first().to_dict()
+        return self._datasets_sample_to_dataset()
+
+    def _dataset_labels(self, patches: pd.DataFrame, dataset: str | None) -> pd.Series:
+        """
+        The ``dataset`` label of every patch, for the ``'dataset'`` condition.
+
+        Training samples keep their own dataset. A sample the model was not trained on gets
+        ``dataset``, else the model's only training dataset; with several and none given,
+        a model conditioned on ``'dataset'`` cannot encode it.
+
+        Args:
+            patches (pd.DataFrame): The patch table, with the sample column.
+            dataset (str | None): The label of samples the model was not trained on.
+
+        Returns:
+            pd.Series: One label per patch (NaN where none applies).
+
+        Raises:
+            ValueError: If a sample needs a label that cannot be told.
+        """
+        labels = patches[self.sample_key].map(self._sample_to_dataset())
+        unseen = labels.isna()
+        if not unseen.any():
+            return labels
+        fill = dataset
+        if fill is None and len(self.datasets or []) == 1:
+            fill = self.datasets[0]
+        conditioned_on_dataset = self.model_config['conditional'] and (
+            'dataset' in self.model_oh_enc.feature_names_in_
+        )
+        if fill is None and conditioned_on_dataset:
+            raise ValueError(
+                f'{patches.loc[unseen, self.sample_key].nunique()} sample(s) are not in the '
+                f"model's training datasets {self.datasets}, and the model is conditioned "
+                'on "dataset": pass encode(dataset=...) to say which dataset they belong to.'
+            )
+        return labels if fill is None else labels.fillna(fill)
+
     def encode(
         self,
         batch_size: int = 64,
@@ -728,6 +838,7 @@ class Phenocoder:
         scale_percentile: int = 1,
         scale_per_sample: bool = True,
         spatial_message_passing_radius: int = None,
+        patch_transform: PatchTransform | None = None,
         dataset: str | None = None,
     ) -> None:
         """
@@ -741,6 +852,9 @@ class Phenocoder:
             batch_size (int, optional): Batch size for encoding predictions. Defaults to 64.
             scale (bool, optional): Whether to intensity-scale patches before encoding. Used
                 only when the patch_generator is (re)built here. Defaults to True.
+                A patch_generator left by ``generate_dataset`` is reused with its own scaling,
+                but its patch table is rebuilt in full, so every object is encoded even after
+                ``generate_dataset(n_patches=...)``.
             spatial_key_index (str | None, optional): obsm key (integer z-index coords) used to
                 extract patches. If None, falls back to self.spatial_key. Defaults to None.
             scale_percentile (float, optional): Percentile (0-100) for per-slice low/high, used
@@ -753,6 +867,11 @@ class Phenocoder:
                 latents over a spatial neighborhood graph of this radius (degree-normalized
                 aggregation), stored in ``.layers['spatial_message_passing']``. If None, no
                 message passing is applied. Defaults to None.
+            patch_transform (callable | None, optional): The transform the training patches
+                were made with (see ``generate_dataset``); applied to every patch before
+                encoding, also when the patch_generator from ``generate_dataset`` is reused.
+                A warning is raised if its name differs from the one in the model's
+                ``config.yaml``. Defaults to None.
             dataset (str | None, optional): The ``dataset`` label of samples the model was not
                 trained on. Needed only when the model is conditioned on ``'dataset'`` and was
                 trained on several; with a single training dataset that one is used. Samples
@@ -779,9 +898,40 @@ class Phenocoder:
             >>> phenocoder.encode(batch_size=128, spatial_message_passing_radius=50)
             >>> phenocoder.sdata.tables['phenocoder']  # AnnData of latents
         """
+        trained_with = self.model_config.get('patch_transform')
+        given = patch_transform_name(patch_transform)
+        if given != trained_with:
+            warnings.warn(
+                f'encode() was given patch_transform={given!r}, but the model was trained '
+                f'on patches made with {trained_with!r}. The latents will not be '
+                'comparable to training; pass the same transform to encode().',
+                stacklevel=2,
+            )
         adatas = []
         samples = self.sdata.tables[self.table_key].obs[self.sample_key].unique()
-        if self.patch_generator is None:
+        if self.patch_generator is not None:
+            # A reused generator keeps the scaling it was built with; encode()'s own
+            # scale argument is not applied to it, so say so rather than returning
+            # latents that silently disagree with what was asked for.
+            if bool(self.patch_generator.scale) != bool(scale):
+                warnings.warn(
+                    f'encode(scale={scale!r}) is reusing the patch generator from '
+                    f'generate_dataset(scale={self.patch_generator.scale!r}), whose '
+                    'scaling is kept. Encode from a fresh Phenocoder to apply '
+                    f'scale={scale!r}.',
+                    stacklevel=2,
+                )
+            self.patch_generator.patch_transform = patch_transform
+            # Reuse the generator from generate_dataset, with its scaling percentiles, but
+            # rebuild its full patch table: generate_dataset(n_patches=...) leaves only the
+            # sampled patches in it, and every object must be encoded.
+            self.patch_generator.init_patches()
+            # Label each sample from the saved patches.csv rather than from the
+            # generator's own `dataset`, which only names the last one generated.
+            self.patch_generator.patches['dataset'] = self._dataset_labels(
+                self.patch_generator.patches, dataset
+            )
+        else:
             if spatial_key_index is None:
                 spatial_key_index = self.spatial_key
             # condition columns the encoder was trained on that must be carried
@@ -805,31 +955,24 @@ class Phenocoder:
                 metadata_keys=metadata_keys,
                 scale_percentile=scale_percentile,
                 scale_per_sample=scale_per_sample,
+                patch_transform=patch_transform,
             )
             self.patch_generator.init_patches()
-            sample_to_dataset = self._training_sample_datasets()
-            samples_dataset = self.patch_generator.patches[self.sample_key].map(
-                sample_to_dataset
+            self.patch_generator.patches['dataset'] = self._dataset_labels(
+                self.patch_generator.patches, dataset
             )
-            unseen = samples_dataset.isna()
-            if unseen.any():
-                fill = dataset
-                if fill is None and len(self.datasets or []) == 1:
-                    fill = self.datasets[0]
-                conditioned_on_dataset = self.model_config['conditional'] and (
-                    'dataset' in self.model_oh_enc.feature_names_in_
-                )
-                if fill is None and conditioned_on_dataset:
-                    raise ValueError(
-                        f'{self.patch_generator.patches.loc[unseen, self.sample_key].nunique()} '
-                        "sample(s) are not in the model's training datasets "
-                        f'{self.datasets}, and the model is conditioned on "dataset": pass '
-                        'encode(dataset=...) to say which dataset they belong to.'
-                    )
-                if fill is not None:
-                    samples_dataset = samples_dataset.fillna(fill)
-            self.patch_generator.patches['dataset'] = samples_dataset
             if scale:
+                missing = self._missing_training_stats()
+                if missing:
+                    # Drop the half-built generator: it is cached with scale=True and no
+                    # percentiles, so the retry this message asks for would reuse it and
+                    # fail again with a different error.
+                    self.patch_generator = None
+                    raise ValueError(
+                        f"encode(scale=True) needs each dataset's stats.csv, but "
+                        f'{missing} have none: they were generated with scale=False. '
+                        'Call encode(scale=False), or regenerate them with scale=True.'
+                    )
                 self.patch_generator.df_stats = self._training_stats()
                 if scale_per_sample:
                     # Each sample is scaled to its own range, so a sample the model was not
@@ -870,43 +1013,35 @@ class Phenocoder:
             adatas.append(adata)
         self.sdata.tables['phenocoder'] = ad.concat(adatas)
 
-    def _training_file(self, name: str) -> list[Path]:
+    def _missing_training_stats(self) -> list[str]:
         """
-        Where to read a training-time table for ``encode``: the copy kept in the model
-        directory, else (models saved before such copies were kept) one per training dataset.
+        Training datasets whose image statistics ``encode`` cannot read.
 
-        Args:
-            name (str): ``'stats.csv'`` or ``'patches.csv'``; the model directory keeps the
-                dataset labels of ``patches.csv`` as ``sample_datasets.csv``.
-
-        Raises:
-            ValueError: If neither the model directory nor ``.datasets`` provides it.
+        None when the model directory keeps them (``stats.csv``, saved by
+        ``initialize_model``); else the datasets without a ``stats.csv`` (generated with
+        ``scale=False``).
         """
-        kept = 'sample_datasets.csv' if name == 'patches.csv' else name
-        if self.model_dir is not None and Path(self.model_dir, kept).exists():
-            return [Path(self.model_dir, kept)]
-        if not self.datasets:
-            raise ValueError(
-                f'No {kept} in the model directory and .datasets is empty -- encode() needs '
-                'the training statistics to recover per-sample scaling and dataset labels. '
-                'Load a model whose directory or config.yaml records them, or set .datasets.'
-            )
-        return [Path(self.dir_dataset(ds), name) for ds in self.datasets]
+        if self.model_dir is not None and Path(self.model_dir, 'stats.csv').exists():
+            return []
+        return [
+            ds
+            for ds in self.datasets or []
+            if not Path(self.dir_dataset(ds), 'stats.csv').exists()
+        ]
 
     def _training_stats(self) -> pd.DataFrame:
-        """The per-slice image statistics of the training samples, for scaling in ``encode``."""
-        return pd.concat(
-            [pd.read_csv(path) for path in self._training_file('stats.csv')],
-            ignore_index=True,
-        )
+        """
+        The per-slice image statistics of the training samples, for scaling in ``encode``.
 
-    def _training_sample_datasets(self) -> dict:
-        """The dataset each training sample came from, ``{sample: dataset}``."""
-        patches = pd.concat(
-            [pd.read_csv(path) for path in self._training_file('patches.csv')],
+        From the model directory's ``stats.csv``, else (models saved before it was kept)
+        from the training datasets' own ``stats.csv``.
+        """
+        if self.model_dir is not None and Path(self.model_dir, 'stats.csv').exists():
+            return pd.read_csv(Path(self.model_dir, 'stats.csv'))
+        return pd.concat(
+            [pd.read_csv(Path(self.dir_dataset(ds), 'stats.csv')) for ds in self.datasets],
             ignore_index=True,
         )
-        return patches.groupby(self.sample_key)['dataset'].first().to_dict()
 
     def spatialgraph_stats(
         self,

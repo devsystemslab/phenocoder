@@ -160,7 +160,19 @@ Key parameters:
   `input_shape`.
 - `spatial_key_index` — the `obsm` key holding integer `(y, x, z)` coordinates.
 - `scale_per_sample` / `scale_percentile` — how intensities are normalized (see
-  [Per-sample vs. global scaling](#per-sample-vs-global-scaling) below).
+  [Per-sample vs. global scaling](#per-sample-vs-global-scaling) below). With `scale=False`
+  no intensity statistics are computed and no `stats.csv` is written.
+- `patch_transform` — a function `patch_transform(patch, obs_row)` applied to every patch
+  after cutting and scaling. `patch` is the `(c, h, w)` array and `obs_row` the object's row
+  of the table's `.obs`, so the transform can use per-object metadata (e.g. which label is
+  the centre object). Its output is what is saved and encoded, so it may change the number of
+  channels (set `input_shape` to match) and the dtype. Pass the same transform to `encode`;
+  its name is recorded in `dataset.yaml` and the model's `config.yaml`, and `encode` warns if
+  it is given a different one.
+- `n_workers` — number of processes writing patches, one sample each at a time (memory is
+  about `n_workers` × the largest image). The output is identical to `n_workers=1`. With
+  `n_workers > 1`, `patch_transform` must be a module-level function or a
+  `functools.partial` of one, so the workers can import it.
 
 ## 2. Initialize the model
 
